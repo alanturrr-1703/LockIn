@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px system-ui, sans-serif; width: 280px; padding: 12px; margin: 0; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    label { display: block; margin: 6px 0; }
+    input[type=text], select { width: 100%; box-sizing: border-box; }
+    button { width: 100%; padding: 8px; margin-top: 8px; cursor: pointer; }
+    #status { margin-top: 8px; min-height: 18px; color: #444; white-space: pre-wrap; }
+    .row { display: flex; gap: 6px; }
+    .row > * { flex: 1; }
+    small { color: #777; }
+  </style>
+</head>
+<body>
+  <h1>YT Tile Scraper</h1>
+  <label>Mode
+    <select id="mode">
+      <option value="lookahead" selected>lookahead (3000px below fold)</option>
+      <option value="strict">strict (visible only)</option>
+      <option value="all">all (everything in DOM)</option>
+    </select>
+  </label>
+  <label>Receiver
+    <input id="endpoint" type="text" value="http://127.0.0.1:8765/tiles" />
+  </label>
+  <div class="row">
+    <button id="scrape">Scrape now</button>
+    <button id="watch">Watch off</button>
+  </div>
+  <div id="status"></div>
+  <small>Run: <code>python scrapper/yt_receiver.py</code></small>
+  <script src="popup.js"></script>
+</body>
+</html>
