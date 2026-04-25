@@ -9,10 +9,10 @@
 //   5. Persist last result to chrome.storage.local for the popup to read
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ALARM_NAME         = "yt-scrape-watch";
-const DEFAULT_ENDPOINT   = "http://localhost:8765/tiles";
-const DEFAULT_MODE       = "lookahead";
-const DEFAULT_INTERVAL   = 0.05; // minutes (~3 seconds)
+const ALARM_NAME = "yt-scrape-watch";
+const DEFAULT_ENDPOINT = "http://localhost:8765/tiles";
+const DEFAULT_MODE = "lookahead";
+const DEFAULT_INTERVAL = 0.05; // minutes (~3 seconds)
 
 // ─── Scrape function (injected into the page via scripting.executeScript) ────
 // Must be a pure, self-contained function — no closures over outer variables.
@@ -86,7 +86,7 @@ function scrapeFn({ mode, lookahead }) {
         "a.yt-lockup-metadata-view-model-wiz__title[href]",
         "a[href*='/watch?v=']",
         "a[href*='/shorts/']",
-      ].join(", ")
+      ].join(", "),
     );
     if (!anchor) return "";
     const href = anchor.getAttribute("href") || "";
@@ -111,34 +111,61 @@ function scrapeFn({ mode, lookahead }) {
     return "";
   };
 
-  // Returns thumbnail src from common img selectors
-  const firstThumb = (el) => {
-    const img = el.querySelector("img#img, img.yt-core-image, img");
-    if (!img) return "";
-    return img.getAttribute("src") || img.getAttribute("data-thumb") || "";
+  // Builds a guaranteed-accurate thumbnail URL from the video ID.
+  // YouTube's CDN always serves thumbnails at this fixed pattern.
+  // We fall back to DOM scraping only when no video ID is available
+  // (e.g. channel tiles, playlists) because img.src is unreliable —
+  // YouTube lazy-loads thumbnails and the src is a blank placeholder
+  // until the image scrolls fully into view.
+  const thumbFromId = (videoId) => {
+    if (videoId) return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    return "";
   };
 
-  const vpH     = window.innerHeight || document.documentElement.clientHeight;
-  const ts      = new Date().toISOString();
+  const thumbFromDom = (el) => {
+    const img = el.querySelector("img#img, img.yt-core-image, img");
+    if (!img) return "";
+    // Check every attribute YouTube might use for the real URL
+    const candidates = [
+      img.getAttribute("src"),
+      img.getAttribute("data-src"),
+      img.getAttribute("data-thumb"),
+    ];
+    for (const c of candidates) {
+      if (c && !c.startsWith("data:") && c.includes("ytimg.com")) return c;
+    }
+    // srcset — take the highest-resolution entry (last one)
+    const srcset = img.getAttribute("srcset") || "";
+    if (srcset) {
+      const entries = srcset.split(",").map((s) => s.trim().split(/\s+/)[0]);
+      const ytEntry = entries.reverse().find((u) => u.includes("ytimg.com"));
+      if (ytEntry) return ytEntry;
+    }
+    return "";
+  };
+
+  const vpH = window.innerHeight || document.documentElement.clientHeight;
+  const ts = new Date().toISOString();
   const seenEls = new Set();
   const seenIds = new Set();
-  const out     = [];
+  const out = [];
 
   const counts = {
-    viewport_h   : vpH,
+    viewport_h: vpH,
     mode,
     lookahead,
-    page_url     : location.href,
-    by_selector  : {},
-    kept         : 0,
+    page_url: location.href,
+    by_selector: {},
+    kept: 0,
     fallback_used: false,
   };
 
   // Viewport / lookahead filter
   const passesViewport = (rect) => {
     if (rect.width === 0 && rect.height === 0) return false;
-    if (mode === "strict")    return rect.bottom > 0 && rect.top < vpH;
-    if (mode === "lookahead") return rect.bottom > 0 && rect.top < vpH + lookahead;
+    if (mode === "strict") return rect.bottom > 0 && rect.top < vpH;
+    if (mode === "lookahead")
+      return rect.bottom > 0 && rect.top < vpH + lookahead;
     return true; // "all"
   };
 
@@ -153,7 +180,7 @@ function scrapeFn({ mode, lookahead }) {
 
       if (!passesViewport(el.getBoundingClientRect())) continue;
 
-      const title   = firstText(el, TITLE_SELECTORS);
+      const title = firstText(el, TITLE_SELECTORS);
       const channel = firstText(el, CHANNEL_SELECTORS);
       if (!title && !channel) continue;
 
@@ -166,15 +193,15 @@ function scrapeFn({ mode, lookahead }) {
       }
 
       out.push({
-        video_id     : vid,
+        video_id: vid,
         title,
         channel,
-        description  : firstText(el, DESC_SELECTORS),
-        thumbnail_url: firstThumb(el),
+        description: firstText(el, DESC_SELECTORS),
+        thumbnail_url: thumbFromId(vid) || thumbFromDom(el),
         url,
-        tile_type    : sel,
-        scraped_at   : ts,
-        page_url     : location.href,
+        tile_type: sel,
+        scraped_at: ts,
+        page_url: location.href,
       });
     }
   }
@@ -184,7 +211,7 @@ function scrapeFn({ mode, lookahead }) {
     counts.fallback_used = true;
 
     const links = document.querySelectorAll(
-      "a[href*='/watch?v='], a[href*='/shorts/']"
+      "a[href*='/watch?v='], a[href*='/shorts/']",
     );
     counts.fallback_links = links.length;
 
@@ -208,23 +235,23 @@ function scrapeFn({ mode, lookahead }) {
 
       if (!passesViewport(card.getBoundingClientRect())) continue;
 
-      const title   = (anchor.getAttribute("title") || anchor.textContent || "")
-                        .replace(/\s+/g, " ")
-                        .trim();
+      const title = (anchor.getAttribute("title") || anchor.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
       const channel = firstText(card, CHANNEL_SELECTORS);
       if (!title && !channel) continue;
 
       seenIds.add(vid);
       out.push({
-        video_id     : vid,
+        video_id: vid,
         title,
         channel,
-        description  : firstText(card, DESC_SELECTORS),
-        thumbnail_url: firstThumb(card),
+        description: firstText(card, DESC_SELECTORS),
+        thumbnail_url: thumbFromId(vid) || thumbFromDom(card),
         url,
-        tile_type    : "fallback:link",
-        scraped_at   : ts,
-        page_url     : location.href,
+        tile_type: "fallback:link",
+        scraped_at: ts,
+        page_url: location.href,
       });
     }
   }
@@ -245,7 +272,10 @@ function autoScrollFn({ steps, stepPx, delayMs }) {
   return new Promise((resolve) => {
     let i = 0;
     const step = () => {
-      if (i >= steps) { resolve(); return; }
+      if (i >= steps) {
+        resolve();
+        return;
+      }
       window.scrollBy({ top: stepPx, behavior: "smooth" });
       i++;
       setTimeout(step, delayMs);
@@ -258,7 +288,7 @@ function autoScrollFn({ steps, stepPx, delayMs }) {
 
 async function getYouTubeTab() {
   const allTabs = await chrome.tabs.query({});
-  const ytTabs  = allTabs.filter((t) => t.url && /youtube\.com/.test(t.url));
+  const ytTabs = allTabs.filter((t) => t.url && /youtube\.com/.test(t.url));
   if (ytTabs.length === 0) return null;
 
   // Prefer the currently active YouTube tab
@@ -285,8 +315,8 @@ async function scrapeAndSend() {
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func  : autoScrollFn,
-      args  : [{ steps: 6, stepPx: 1400, delayMs: 600 }],
+      func: autoScrollFn,
+      args: [{ steps: 6, stepPx: 1400, delayMs: 600 }],
     });
     // Give the last batch of lazy-loaded tiles time to render
     await new Promise((r) => setTimeout(r, 800));
@@ -299,15 +329,15 @@ async function scrapeAndSend() {
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func  : scrapeFn,
-      args  : [{ mode: "all", lookahead: 3000 }],
+      func: scrapeFn,
+      args: [{ mode: "all", lookahead: 3000 }],
     });
     scrapeResult = result || { tiles: [], counts: {} };
   } catch (e) {
     return { ok: false, reason: "Scrape script failed: " + e.message };
   }
 
-  const tiles  = scrapeResult.tiles  || [];
+  const tiles = scrapeResult.tiles || [];
   const counts = scrapeResult.counts || {};
 
   if (tiles.length === 0) {
@@ -319,40 +349,41 @@ async function scrapeAndSend() {
       ? ` | fallback_links=${counts.fallback_links || 0}`
       : "";
     return {
-      ok    : true,
-      sent  : 0,
+      ok: true,
+      sent: 0,
       accepted: 0,
       counts,
-      reason: `0 tiles scraped. selectors=[${selectorBreakdown || "none matched"}]${fallbackNote}` +
-              ` | mode=${counts.mode} | viewport_h=${counts.viewport_h}` +
-              ` | page=${counts.page_url}`,
+      reason:
+        `0 tiles scraped. selectors=[${selectorBreakdown || "none matched"}]${fallbackNote}` +
+        ` | mode=${counts.mode} | viewport_h=${counts.viewport_h}` +
+        ` | page=${counts.page_url}`,
     };
   }
 
   // POST tiles to the Java receiver
   try {
     const response = await fetch(endpoint, {
-      method : "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body   : JSON.stringify({ tiles, page_url: tab.url }),
+      body: JSON.stringify({ tiles, page_url: tab.url }),
     });
 
     if (!response.ok) {
       return {
-        ok    : false,
+        ok: false,
         reason: `Receiver responded with HTTP ${response.status}.`,
         counts,
       };
     }
 
-    const data     = await response.json().catch(() => ({}));
-    const accepted = typeof data.accepted === "number" ? data.accepted : tiles.length;
+    const data = await response.json().catch(() => ({}));
+    const accepted =
+      typeof data.accepted === "number" ? data.accepted : tiles.length;
 
     return { ok: true, sent: tiles.length, accepted, counts };
-
   } catch (e) {
     return {
-      ok    : false,
+      ok: false,
       reason: `Receiver unreachable (${e.message}). Is ./gradlew runReceiver running?`,
       counts,
     };
@@ -377,7 +408,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
 
     switch (msg.cmd) {
-
       case "scrape": {
         sendResponse(await scrapeAndSend());
         break;
@@ -386,14 +416,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "watch-start": {
         const minutes = Math.max(
           0.05,
-          Number(msg.intervalMinutes) || DEFAULT_INTERVAL
+          Number(msg.intervalMinutes) || DEFAULT_INTERVAL,
         );
         await chrome.alarms.create(ALARM_NAME, { periodInMinutes: minutes });
         const immediate = await scrapeAndSend();
         await chrome.storage.local.set({
-          watchOn   : true,
+          watchOn: true,
           lastResult: immediate,
-          lastAt    : Date.now(),
+          lastAt: Date.now(),
         });
         sendResponse({ ok: true, watchOn: true, immediate });
         break;
