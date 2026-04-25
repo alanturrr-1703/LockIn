@@ -290,7 +290,7 @@ public class TileReceiver {
             final String finalTs = receivedAt;
 
             List<CompletableFuture<Void>> futures = toSave
-                .stream()
+                .parallelStream()
                 .filter(tile -> needsEnrichment(tile))
                 .map(tile -> {
                     String vid = tile.path("video_id").asText("").trim();
