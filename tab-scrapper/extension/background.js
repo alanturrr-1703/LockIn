@@ -235,10 +235,26 @@ function scrapeFn({ mode, lookahead }) {
 
       if (!passesViewport(card.getBoundingClientRect())) continue;
 
-      const title = (anchor.getAttribute("title") || anchor.textContent || "")
+      // Regex to detect duration-badge anchors like "18:11" or "1:23:45"
+      const DURATION_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
+
+      const anchorText = (
+        anchor.getAttribute("title") ||
+        anchor.textContent ||
+        ""
+      )
         .replace(/\s+/g, " ")
         .trim();
+
+      // Skip anchors whose visible text is just a video duration —
+      // these are the timestamp overlays on thumbnails, not title links
+      if (!anchorText || DURATION_RE.test(anchorText)) continue;
+
+      // Prefer a proper title from the card's title selectors;
+      // fall back to the anchor text only if nothing else is found
+      const title = firstText(card, TITLE_SELECTORS) || anchorText;
       const channel = firstText(card, CHANNEL_SELECTORS);
+
       if (!title && !channel) continue;
 
       seenIds.add(vid);
@@ -247,7 +263,9 @@ function scrapeFn({ mode, lookahead }) {
         title,
         channel,
         description: firstText(card, DESC_SELECTORS),
-        thumbnail_url: thumbFromId(vid) || thumbFromDom(card),
+        // Always derive from video_id — DOM thumbnails are unreliable because
+        // the fallback card boundary may contain a neighbour's <img> element
+        thumbnail_url: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
         url,
         tile_type: "fallback:link",
         scraped_at: ts,
