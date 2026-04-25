@@ -322,6 +322,40 @@ async function suggestTags(profile, modelSettings, fallbackTopic) {
   }
 }
 
+// ── Classification cache + rate limiter ─────────────────────────────────────
+// Persisted in chrome.storage.local so results survive service-worker restarts.
+const CACHE_KEY = "classificationCache";
+const RATE_LIMIT_MS = 12_000; // minimum ms between Gemini calls
+let lastGeminiCallAt = 0; // in-memory; resets with the service worker
+
+async function loadClassificationCache() {
+  const stored = await chrome.storage.local.get(CACHE_KEY);
+  return (stored && stored[CACHE_KEY]) || {};
+}
+
+async function saveClassificationCache(cache) {
+  await chrome.storage.local.set({ [CACHE_KEY]: cache });
+}
+
+/**
+ * Calls callChatCompletion with one automatic retry on HTTP 429.
+ * Waits 2 s before the retry; if it 429s again, throws so the caller
+ * can allow the batch instead of blocking it.
+ */
+async function callWithRetry(modelSettings, messages) {
+  try {
+    return await callChatCompletion(modelSettings, messages);
+  } catch (err) {
+    const msg = String((err && err.message) || "");
+    if (msg.includes("429")) {
+      console.warn("[LockIn] 429 rate-limit — retrying after 2 s…");
+      await new Promise((r) => setTimeout(r, 2000));
+      return await callChatCompletion(modelSettings, messages); // throws if 429 again
+    }
+    throw err;
+  }
+}
+
 async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
   if (!tiles.length) return { blockedItemKeys: [], usedModel: false };
 
@@ -331,47 +365,82 @@ async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
     : topicWords(topic);
 
   // ── LLM path ────────────────────────────────────────────────────────────
-  // When LLM is enabled and an API key is present, use Gemini exclusively.
-  // On any network/parse error we allow all tiles in the failing batch rather
-  // than silently falling through to the aggressive heuristic.
   if (modelSettings.enabled && modelSettings.apiKey && modelSettings.endpoint) {
     const blockedItemKeys = new Set();
 
-    for (const batch of chunk(tiles, MODEL_CHUNK_SIZE)) {
-      const items = batch.map(tileSummary);
-      const prompt = [
-        "You are a relevance filter for YouTube recommendations.",
-        'Given a user profile and a list of video tiles, return JSON only: {"irrelevant_keys":[...]}.',
-        "Mark a tile as irrelevant ONLY when it is clearly and completely unrelated to the profile.",
-        "When the topic is ambiguous or the tile could plausibly interest someone with this profile, keep it relevant.",
-        "Do NOT block everything — only obvious mismatches like unrelated entertainment, sports highlights, or cooking videos for a pure CS profile.",
-        `Profile name: ${activeProfile.name}`,
-        `Profile description: ${activeProfile.description || "(none)"}`,
-        `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
-        `Items: ${JSON.stringify(items)}`,
-      ].join("\n");
+    // Load persisted cache — already-seen item_keys skip Gemini entirely
+    const cache = await loadClassificationCache();
 
-      try {
-        const content = await callChatCompletion(modelSettings, [
-          {
-            role: "system",
-            content:
-              "Return valid JSON only. Never return an empty irrelevant_keys list unless everything is clearly relevant.",
-          },
-          { role: "user", content: prompt },
-        ]);
-        const parsed = extractJsonObject(content);
-        const irrelevant = Array.isArray(parsed && parsed.irrelevant_keys)
-          ? parsed.irrelevant_keys
-          : [];
-        for (const key of irrelevant) {
-          const k = String(key || "").trim();
-          if (k) blockedItemKeys.add(k);
-        }
-      } catch (err) {
-        // LLM failed — allow the whole batch rather than blocking everything
-        console.warn("[LockIn] LLM error, allowing batch:", err && err.message);
+    // Split tiles into cached (result known) and fresh (need Gemini)
+    const fresh = [];
+    for (const tile of tiles) {
+      const key = tile.item_key;
+      if (!key) continue;
+      if (key in cache) {
+        if (cache[key]) blockedItemKeys.add(key); // cached irrelevant
+      } else {
+        fresh.push(tile);
       }
+    }
+
+    if (fresh.length > 0) {
+      // Rate-limit: skip Gemini if called too recently
+      const now = Date.now();
+      const msSinceLast = now - lastGeminiCallAt;
+      if (msSinceLast < RATE_LIMIT_MS) {
+        const wait = RATE_LIMIT_MS - msSinceLast;
+        console.log(
+          `[LockIn] Rate-limit: waiting ${wait} ms before Gemini call`,
+        );
+        await new Promise((r) => setTimeout(r, wait));
+      }
+      lastGeminiCallAt = Date.now();
+
+      for (const batch of chunk(fresh, MODEL_CHUNK_SIZE)) {
+        const items = batch.map(tileSummary);
+        const prompt = [
+          "You are a relevance filter for YouTube recommendations.",
+          'Given a user profile and a list of video tiles, return JSON only: {"irrelevant_keys":[...]}.',
+          "Mark a tile as irrelevant ONLY when it is clearly and completely unrelated to the profile.",
+          "When the topic is ambiguous or the tile could plausibly interest someone with this profile, keep it relevant.",
+          "Do NOT block everything — only obvious mismatches like unrelated entertainment, sports highlights, or cooking videos for a pure CS profile.",
+          `Profile name: ${activeProfile.name}`,
+          `Profile description: ${activeProfile.description || "(none)"}`,
+          `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
+          `Items: ${JSON.stringify(items)}`,
+        ].join("\n");
+
+        try {
+          const content = await callWithRetry(modelSettings, [
+            {
+              role: "system",
+              content: "Return valid JSON only.",
+            },
+            { role: "user", content: prompt },
+          ]);
+          const parsed = extractJsonObject(content);
+          const irrelevant = Array.isArray(parsed && parsed.irrelevant_keys)
+            ? parsed.irrelevant_keys
+            : [];
+
+          // Write results into cache and blocked set
+          for (const item of items) {
+            const isIrrelevant = irrelevant
+              .map((k) => String(k || "").trim())
+              .includes(item.item_key);
+            cache[item.item_key] = isIrrelevant;
+            if (isIrrelevant) blockedItemKeys.add(item.item_key);
+          }
+        } catch (err) {
+          // LLM failed (including second 429) — allow the batch, mark as unknown
+          console.warn(
+            "[LockIn] LLM error, allowing batch:",
+            err && err.message,
+          );
+        }
+      }
+
+      await saveClassificationCache(cache);
     }
 
     return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
