@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Scraper → Java",
+  "version": "0.1.0",
+  "description": "Scrape the active tab (title, URL, text, HTML) and POST it to a local Java/Spring Boot backend on port 8080.",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost:8080/*",
+    "http://127.0.0.1:8080/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_title": "Scrape this tab",
+    "default_popup": "popup.html"
+  }
+}

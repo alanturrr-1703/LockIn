@@ -1,0 +1,50 @@
+# ── Gradle ────────────────────────────────────────────────────────────────────
+.gradle/
+build/
+bin/
+out/
+
+# ── Runtime data (H2 database + NDJSON output files) ─────────────────────────
+data/
+*.mv.db
+*.trace.db
+*.jsonl
+*.ndjson
+tiles.jsonl
+scrapes.jsonl
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.code-workspace
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Secrets / env ────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
