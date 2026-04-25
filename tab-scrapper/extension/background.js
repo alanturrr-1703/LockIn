@@ -323,70 +323,74 @@ async function suggestTags(profile, modelSettings, fallbackTopic) {
 }
 
 async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
-  const blockedItemKeys = new Set();
+  if (!tiles.length) return { blockedItemKeys: [], usedModel: false };
+
   const activeProfile = profilePrompt(profile, topic);
   const profileFallback = activeProfile.tags.length
     ? activeProfile.tags
     : topicWords(topic);
-  if (!tiles.length) return { blockedItemKeys: [], usedModel: false };
 
-  if (
-    !modelSettings.enabled ||
-    !modelSettings.apiKey ||
-    !modelSettings.endpoint
-  ) {
-    for (const tile of tiles) {
-      if (heuristicIrrelevant(tile, activeProfile, topic)) {
-        blockedItemKeys.add(tile.item_key);
+  // ── LLM path ────────────────────────────────────────────────────────────
+  // When LLM is enabled and an API key is present, use Gemini exclusively.
+  // On any network/parse error we allow all tiles in the failing batch rather
+  // than silently falling through to the aggressive heuristic.
+  if (modelSettings.enabled && modelSettings.apiKey && modelSettings.endpoint) {
+    const blockedItemKeys = new Set();
+
+    for (const batch of chunk(tiles, MODEL_CHUNK_SIZE)) {
+      const items = batch.map(tileSummary);
+      const prompt = [
+        "You are a relevance filter for YouTube recommendations.",
+        'Given a user profile and a list of video tiles, return JSON only: {"irrelevant_keys":[...]}.',
+        "Mark a tile as irrelevant ONLY when it is clearly and completely unrelated to the profile.",
+        "When the topic is ambiguous or the tile could plausibly interest someone with this profile, keep it relevant.",
+        "Do NOT block everything — only obvious mismatches like unrelated entertainment, sports highlights, or cooking videos for a pure CS profile.",
+        `Profile name: ${activeProfile.name}`,
+        `Profile description: ${activeProfile.description || "(none)"}`,
+        `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
+        `Items: ${JSON.stringify(items)}`,
+      ].join("\n");
+
+      try {
+        const content = await callChatCompletion(modelSettings, [
+          {
+            role: "system",
+            content:
+              "Return valid JSON only. Never return an empty irrelevant_keys list unless everything is clearly relevant.",
+          },
+          { role: "user", content: prompt },
+        ]);
+        const parsed = extractJsonObject(content);
+        const irrelevant = Array.isArray(parsed && parsed.irrelevant_keys)
+          ? parsed.irrelevant_keys
+          : [];
+        for (const key of irrelevant) {
+          const k = String(key || "").trim();
+          if (k) blockedItemKeys.add(k);
+        }
+      } catch (err) {
+        // LLM failed — allow the whole batch rather than blocking everything
+        console.warn("[LockIn] LLM error, allowing batch:", err && err.message);
       }
     }
-    return { blockedItemKeys: [...blockedItemKeys], usedModel: false };
+
+    return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
   }
 
-  for (const batch of chunk(tiles, MODEL_CHUNK_SIZE)) {
-    const items = batch.map(tileSummary);
-    const prompt = [
-      "You are a strict relevance filter for YouTube recommendations.",
-      'Given a profile and a list of items, return JSON only: {"irrelevant_keys":[...]}.',
-      "Mark an item irrelevant if it is off-topic, weakly related, clickbait, or not useful for the profile.",
-      `Profile name: ${activeProfile.name}`,
-      `Profile description: ${activeProfile.description || "(none)"}`,
-      `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
-      `Items: ${JSON.stringify(items)}`,
-    ].join("\n");
-    try {
-      const content = await callChatCompletion(modelSettings, [
-        { role: "system", content: "Return valid JSON only." },
-        { role: "user", content: prompt },
-      ]);
-      const parsed = extractJsonObject(content);
-      const irrelevant = Array.isArray(parsed && parsed.irrelevant_keys)
-        ? parsed.irrelevant_keys
-        : [];
-      const relevant = Array.isArray(parsed && parsed.relevant_keys)
-        ? parsed.relevant_keys
-        : [];
-      for (const key of irrelevant)
-        blockedItemKeys.add(String(key || "").trim());
-      if (irrelevant.length === 0 && relevant.length > 0) {
-        const relevantSet = new Set(
-          relevant.map((k) => String(k || "").trim()),
-        );
-        for (const item of items) {
-          if (!relevantSet.has(item.item_key))
-            blockedItemKeys.add(item.item_key);
-        }
-      }
-    } catch (_) {
-      for (const tile of batch) {
-        if (heuristicIrrelevant(tile, activeProfile, topic)) {
-          blockedItemKeys.add(tile.item_key);
-        }
-      }
+  // ── Heuristic path ───────────────────────────────────────────────────────
+  // Only runs when LLM is explicitly OFF.
+  // If there are no profile tags and no topic we have no signal — allow all.
+  if (!profileFallback.length) {
+    return { blockedItemKeys: [], usedModel: false };
+  }
+
+  const blockedItemKeys = new Set();
+  for (const tile of tiles) {
+    if (heuristicIrrelevant(tile, activeProfile, topic)) {
+      blockedItemKeys.add(tile.item_key);
     }
   }
-
-  return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
+  return { blockedItemKeys: [...blockedItemKeys], usedModel: false };
 }
 
 async function postTilesToReceiver(

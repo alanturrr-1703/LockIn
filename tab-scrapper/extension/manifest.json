@@ -14,7 +14,8 @@
   "host_permissions": [
     "*://*.youtube.com/*",
     "http://127.0.0.1:8765/*",
-    "http://localhost:8765/*"
+    "http://localhost:8765/*",
+    "https://generativelanguage.googleapis.com/*"
   ],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
