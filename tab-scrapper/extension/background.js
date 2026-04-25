@@ -322,38 +322,55 @@ async function suggestTags(profile, modelSettings, fallbackTopic) {
   }
 }
 
-// ── Classification cache + rate limiter ─────────────────────────────────────
-// Persisted in chrome.storage.local so results survive service-worker restarts.
-const CACHE_KEY = "classificationCache";
-const RATE_LIMIT_MS = 12_000; // minimum ms between Gemini calls
-let lastGeminiCallAt = 0; // in-memory; resets with the service worker
+// ── Classification cache (TTL-aware) + exponential backoff ──────────────────
+//
+// Cache format:  { [item_key]: { v: boolean, exp: number } }
+//   v   – true = irrelevant (block), false = relevant (allow)
+//   exp – epoch-ms after which this entry is treated as fresh again.
+//         0 means "permanent" (never re-classify).
+//
+// Backoff format: { until: number, count: number }
+//   until – epoch-ms before which ALL Gemini calls are suppressed.
+//   count – how many 429s in a row (used for exponential delay).
+//
+// Both are stored in chrome.storage.local so they survive SW restarts.
 
-async function loadClassificationCache() {
-  const stored = await chrome.storage.local.get(CACHE_KEY);
-  return (stored && stored[CACHE_KEY]) || {};
+const CACHE_KEY = "classificationCache";
+const BACKOFF_KEY = "geminiBackoff";
+
+// Delays used for successive 429s: 30 s → 60 s → 2 min → 5 min → 10 min
+const BACKOFF_DELAYS = [30_000, 60_000, 120_000, 300_000, 600_000];
+
+// Tiles that 429-failed are cached as "allowed" for this long before retry.
+const FAILED_TTL_MS = 5 * 60_000; // 5 minutes
+
+async function loadCache() {
+  const s = await chrome.storage.local.get(CACHE_KEY);
+  return (s && s[CACHE_KEY]) || {};
 }
 
-async function saveClassificationCache(cache) {
+async function saveCache(cache) {
   await chrome.storage.local.set({ [CACHE_KEY]: cache });
 }
 
-/**
- * Calls callChatCompletion with one automatic retry on HTTP 429.
- * Waits 2 s before the retry; if it 429s again, throws so the caller
- * can allow the batch instead of blocking it.
- */
-async function callWithRetry(modelSettings, messages) {
-  try {
-    return await callChatCompletion(modelSettings, messages);
-  } catch (err) {
-    const msg = String((err && err.message) || "");
-    if (msg.includes("429")) {
-      console.warn("[LockIn] 429 rate-limit — retrying after 2 s…");
-      await new Promise((r) => setTimeout(r, 2000));
-      return await callChatCompletion(modelSettings, messages); // throws if 429 again
-    }
-    throw err;
-  }
+async function loadBackoff() {
+  const s = await chrome.storage.local.get(BACKOFF_KEY);
+  return (s && s[BACKOFF_KEY]) || { until: 0, count: 0 };
+}
+
+async function recordBackoff() {
+  const b = await loadBackoff();
+  const delay = BACKOFF_DELAYS[Math.min(b.count, BACKOFF_DELAYS.length - 1)];
+  const next = { until: Date.now() + delay, count: b.count + 1 };
+  await chrome.storage.local.set({ [BACKOFF_KEY]: next });
+  console.warn(
+    `[LockIn] 429 backoff #${next.count}: pausing Gemini for ${delay / 1000}s`,
+  );
+  return next.until;
+}
+
+async function clearBackoff() {
+  await chrome.storage.local.set({ [BACKOFF_KEY]: { until: 0, count: 0 } });
 }
 
 async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
@@ -367,82 +384,108 @@ async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
   // ── LLM path ────────────────────────────────────────────────────────────
   if (modelSettings.enabled && modelSettings.apiKey && modelSettings.endpoint) {
     const blockedItemKeys = new Set();
+    const now = Date.now();
 
-    // Load persisted cache — already-seen item_keys skip Gemini entirely
-    const cache = await loadClassificationCache();
-
-    // Split tiles into cached (result known) and fresh (need Gemini)
+    // ── 1. Load cache; split tiles into cached vs fresh ──────────────────
+    const cache = await loadCache();
     const fresh = [];
+
     for (const tile of tiles) {
       const key = tile.item_key;
       if (!key) continue;
-      if (key in cache) {
-        if (cache[key]) blockedItemKeys.add(key); // cached irrelevant
+      const entry = cache[key];
+      if (entry !== undefined) {
+        // Cached: check if the TTL has expired
+        if (entry.exp === 0 || now < entry.exp) {
+          // Still valid — use cached result
+          if (entry.v) blockedItemKeys.add(key);
+        } else {
+          // Expired — treat as fresh so Gemini re-evaluates it
+          fresh.push(tile);
+        }
       } else {
         fresh.push(tile);
       }
     }
 
-    if (fresh.length > 0) {
-      // Rate-limit: skip Gemini if called too recently
-      const now = Date.now();
-      const msSinceLast = now - lastGeminiCallAt;
-      if (msSinceLast < RATE_LIMIT_MS) {
-        const wait = RATE_LIMIT_MS - msSinceLast;
-        console.log(
-          `[LockIn] Rate-limit: waiting ${wait} ms before Gemini call`,
-        );
-        await new Promise((r) => setTimeout(r, wait));
-      }
-      lastGeminiCallAt = Date.now();
-
-      for (const batch of chunk(fresh, MODEL_CHUNK_SIZE)) {
-        const items = batch.map(tileSummary);
-        const prompt = [
-          "You are a relevance filter for YouTube recommendations.",
-          'Given a user profile and a list of video tiles, return JSON only: {"irrelevant_keys":[...]}.',
-          "Mark a tile as irrelevant ONLY when it is clearly and completely unrelated to the profile.",
-          "When the topic is ambiguous or the tile could plausibly interest someone with this profile, keep it relevant.",
-          "Do NOT block everything — only obvious mismatches like unrelated entertainment, sports highlights, or cooking videos for a pure CS profile.",
-          `Profile name: ${activeProfile.name}`,
-          `Profile description: ${activeProfile.description || "(none)"}`,
-          `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
-          `Items: ${JSON.stringify(items)}`,
-        ].join("\n");
-
-        try {
-          const content = await callWithRetry(modelSettings, [
-            {
-              role: "system",
-              content: "Return valid JSON only.",
-            },
-            { role: "user", content: prompt },
-          ]);
-          const parsed = extractJsonObject(content);
-          const irrelevant = Array.isArray(parsed && parsed.irrelevant_keys)
-            ? parsed.irrelevant_keys
-            : [];
-
-          // Write results into cache and blocked set
-          for (const item of items) {
-            const isIrrelevant = irrelevant
-              .map((k) => String(k || "").trim())
-              .includes(item.item_key);
-            cache[item.item_key] = isIrrelevant;
-            if (isIrrelevant) blockedItemKeys.add(item.item_key);
-          }
-        } catch (err) {
-          // LLM failed (including second 429) — allow the batch, mark as unknown
-          console.warn(
-            "[LockIn] LLM error, allowing batch:",
-            err && err.message,
-          );
-        }
-      }
-
-      await saveClassificationCache(cache);
+    // ── 2. Skip Gemini entirely if nothing new to classify ────────────────
+    if (fresh.length === 0) {
+      return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
     }
 
+    // ── 3. Check persistent backoff ───────────────────────────────────────
+    const backoff = await loadBackoff();
+    if (backoff.until > now) {
+      const remainS = Math.ceil((backoff.until - now) / 1000);
+      console.log(
+        `[LockIn] Gemini in backoff — ${remainS}s remaining. ` +
+          `Allowing ${fresh.length} fresh tile(s) temporarily.`,
+      );
+      // Cache the fresh tiles as "allowed" until the backoff clears
+      const exp = backoff.until + 5_000; // re-try shortly after backoff lifts
+      for (const tile of fresh) {
+        cache[tile.item_key] = { v: false, exp };
+      }
+      await saveCache(cache);
+      return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
+    }
+
+    // ── 4. Call Gemini for fresh tiles only ───────────────────────────────
+    for (const batch of chunk(fresh, MODEL_CHUNK_SIZE)) {
+      const items = batch.map(tileSummary);
+      const prompt = [
+        "You are a relevance filter for YouTube recommendations.",
+        'Given a user profile and a list of video tiles, return JSON only: {"irrelevant_keys":[...]}.',
+        "Mark a tile as irrelevant ONLY when it is clearly and completely unrelated to the profile.",
+        "When the topic is ambiguous or the tile could plausibly interest someone with this profile, keep it relevant.",
+        "Do NOT block everything — only obvious mismatches like unrelated entertainment, sports, or cooking for a CS profile.",
+        `Profile name: ${activeProfile.name}`,
+        `Profile description: ${activeProfile.description || "(none)"}`,
+        `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
+        `Items: ${JSON.stringify(items)}`,
+      ].join("\n");
+
+      try {
+        const content = await callChatCompletion(modelSettings, [
+          { role: "system", content: "Return valid JSON only." },
+          { role: "user", content: prompt },
+        ]);
+
+        // Success — reset backoff counter
+        await clearBackoff();
+
+        const parsed = extractJsonObject(content);
+        const irrelevant = new Set(
+          (Array.isArray(parsed && parsed.irrelevant_keys)
+            ? parsed.irrelevant_keys
+            : []
+          ).map((k) => String(k || "").trim()),
+        );
+
+        // Cache permanently (exp = 0) and collect blocked keys
+        for (const item of items) {
+          const isIrrelevant = irrelevant.has(item.item_key);
+          cache[item.item_key] = { v: isIrrelevant, exp: 0 };
+          if (isIrrelevant) blockedItemKeys.add(item.item_key);
+        }
+      } catch (err) {
+        const msg = String((err && err.message) || "");
+        if (msg.includes("429")) {
+          // Record exponential backoff so subsequent scrapes stay quiet
+          const backoffUntil = await recordBackoff();
+          // Cache the failed batch as "allowed" until just after backoff lifts
+          const exp = backoffUntil + 5_000;
+          for (const item of items) {
+            cache[item.item_key] = { v: false, exp };
+          }
+        } else {
+          // Non-429 error — allow the batch, don't cache (will retry next time)
+          console.warn("[LockIn] LLM error, allowing batch:", msg);
+        }
+      }
+    }
+
+    await saveCache(cache);
     return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
   }
 
