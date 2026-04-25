@@ -108,6 +108,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("scrape").addEventListener("click", scrape);
   $("watch").addEventListener("click", toggleWatch);
   $("settings").addEventListener("click", () =>
-    chrome.runtime.openOptionsPage(),
+    chrome.tabs.create({ url: chrome.runtime.getURL("options.html") }),
   );
 });

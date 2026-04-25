@@ -1,6 +1,7 @@
 const DEFAULT_MODEL_SETTINGS = {
   enabled: false,
-  endpoint: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+  endpoint:
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
   model: "gemini-2.5-flash",
   apiKey: "",
 };
@@ -8,8 +9,17 @@ const DEFAULT_MODEL_SETTINGS = {
 const DEFAULT_PROFILE = {
   id: "default-profile",
   name: "Computer science student",
-  description: "Focus on algorithms, data structures, system design, ML, and practical coding content.",
-  tags: ["dsa", "algorithms", "data structures", "ml", "dl", "system design", "python"],
+  description:
+    "Focus on algorithms, data structures, system design, ML, and practical coding content.",
+  tags: [
+    "dsa",
+    "algorithms",
+    "data structures",
+    "ml",
+    "dl",
+    "system design",
+    "python",
+  ],
   active: true,
 };
 
@@ -23,15 +33,26 @@ const state = {
 };
 
 function uniqStrings(list) {
-  return [...new Set((list || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      (list || []).map((value) => String(value || "").trim()).filter(Boolean),
+    ),
+  ];
 }
 
 function normalizeTag(tag) {
-  return String(tag || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return String(tag || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
 }
 
 function splitTags(text) {
-  return uniqStrings(String(text || "").split(/[,\n]/g).map(normalizeTag));
+  return uniqStrings(
+    String(text || "")
+      .split(/[,\n]/g)
+      .map(normalizeTag),
+  );
 }
 
 function makeId(prefix) {
@@ -44,9 +65,18 @@ function makeId(prefix) {
 function ensureProfile(profile) {
   return {
     id: String(profile && profile.id ? profile.id : makeId("profile")),
-    name: String(profile && profile.name ? profile.name : DEFAULT_PROFILE.name).trim() || DEFAULT_PROFILE.name,
-    description: String(profile && profile.description ? profile.description : "").trim(),
-    tags: uniqStrings(Array.isArray(profile && profile.tags) ? profile.tags.map(normalizeTag) : []),
+    name:
+      String(
+        profile && profile.name ? profile.name : DEFAULT_PROFILE.name,
+      ).trim() || DEFAULT_PROFILE.name,
+    description: String(
+      profile && profile.description ? profile.description : "",
+    ).trim(),
+    tags: uniqStrings(
+      Array.isArray(profile && profile.tags)
+        ? profile.tags.map(normalizeTag)
+        : [],
+    ),
     active: !!(profile && profile.active),
   };
 }
@@ -56,7 +86,11 @@ function defaultProfile() {
 }
 
 function getActiveProfile() {
-  return state.profiles.find((p) => p.id === state.activeProfileId) || state.profiles[0] || defaultProfile();
+  return (
+    state.profiles.find((p) => p.id === state.activeProfileId) ||
+    state.profiles[0] ||
+    defaultProfile()
+  );
 }
 
 async function loadState() {
@@ -75,9 +109,12 @@ async function loadState() {
   state.activeProfileId = String(
     stored.activeProfileId ||
       state.profiles.find((p) => p.active)?.id ||
-      state.profiles[0].id
+      state.profiles[0].id,
   );
-  state.modelSettings = { ...DEFAULT_MODEL_SETTINGS, ...(stored.modelSettings || {}) };
+  state.modelSettings = {
+    ...DEFAULT_MODEL_SETTINGS,
+    ...(stored.modelSettings || {}),
+  };
   if (stored.endpoint && !state.modelSettings.endpoint) {
     state.modelSettings.endpoint = stored.endpoint;
   }
@@ -86,10 +123,10 @@ async function loadState() {
   }
   state.modelSettings.enabled = !!state.modelSettings.enabled;
   state.modelSettings.endpoint = String(
-    state.modelSettings.endpoint || DEFAULT_MODEL_SETTINGS.endpoint
+    state.modelSettings.endpoint || DEFAULT_MODEL_SETTINGS.endpoint,
   );
   state.modelSettings.model = String(
-    state.modelSettings.model || DEFAULT_MODEL_SETTINGS.model
+    state.modelSettings.model || DEFAULT_MODEL_SETTINGS.model,
   );
   state.modelSettings.apiKey = String(state.modelSettings.apiKey || "");
 }
@@ -187,7 +224,8 @@ function renderFields() {
   $("model-endpoint").value = state.modelSettings.endpoint;
   $("model-name").value = state.modelSettings.model;
   $("model-key").value = state.modelSettings.apiKey;
-  $("profile-status").textContent = `${state.profiles.length} profile(s) configured. Active: ${profile.name}.`;
+  $("profile-status").textContent =
+    `${state.profiles.length} profile(s) configured. Active: ${profile.name}.`;
 }
 
 function render() {
@@ -214,14 +252,16 @@ async function persistProfiles() {
 async function persistModelSettings() {
   state.modelSettings.enabled = $("model-enabled").value === "1";
   state.modelSettings.endpoint = String(
-    $("model-endpoint").value || DEFAULT_MODEL_SETTINGS.endpoint
+    $("model-endpoint").value || DEFAULT_MODEL_SETTINGS.endpoint,
   ).trim();
   state.modelSettings.model = String(
-    $("model-name").value || DEFAULT_MODEL_SETTINGS.model
+    $("model-name").value || DEFAULT_MODEL_SETTINGS.model,
   ).trim();
   state.modelSettings.apiKey = String($("model-key").value || "");
   await chrome.storage.local.set({ modelSettings: state.modelSettings });
-  renderPermissionStatus(`Saved model settings for ${state.modelSettings.endpoint}.`);
+  renderPermissionStatus(
+    `Saved model settings for ${state.modelSettings.endpoint}.`,
+  );
 }
 
 function setProfileStatus(msg) {
@@ -230,7 +270,7 @@ function setProfileStatus(msg) {
 
 async function requestEndpointPermission() {
   const endpoint = String(
-    $("model-endpoint").value || DEFAULT_MODEL_SETTINGS.endpoint
+    $("model-endpoint").value || DEFAULT_MODEL_SETTINGS.endpoint,
   ).trim();
   try {
     const origin = new URL(endpoint).origin;
@@ -244,7 +284,7 @@ async function requestEndpointPermission() {
     renderPermissionStatus(
       ok
         ? `Permission granted for ${pattern}.`
-        : `Permission not granted for ${pattern}.`
+        : `Permission not granted for ${pattern}.`,
     );
   } catch (err) {
     renderPermissionStatus(`Invalid endpoint URL: ${err.message}`);
@@ -322,7 +362,10 @@ async function suggestTagsFromModel() {
     setProfileStatus((response && response.reason) || "Tag suggestion failed.");
     return;
   }
-  profile.tags = uniqStrings([...(profile.tags || []), ...(response.tags || [])]);
+  profile.tags = uniqStrings([
+    ...(profile.tags || []),
+    ...(response.tags || []),
+  ]);
   await persistProfiles();
   setProfileStatus(`Added ${(response.tags || []).length} suggested tag(s).`);
 }
@@ -366,8 +409,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("open-popup").addEventListener("click", () => {
-    if (chrome.action && chrome.action.openPopup) {
-      chrome.action.openPopup();
-    }
+    // chrome.action.openPopup() requires Chrome 127+ and specific contexts.
+    // Simply close this settings tab — the user can click the toolbar icon.
+    chrome.tabs.getCurrent((tab) => {
+      if (tab && tab.id) {
+        chrome.tabs.remove(tab.id);
+      }
+    });
   });
 });
