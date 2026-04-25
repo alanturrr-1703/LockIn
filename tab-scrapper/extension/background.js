@@ -283,25 +283,6 @@ function scrapeFn({ mode, lookahead }) {
   return { tiles: out, counts };
 }
 
-// ─── Auto-scroll function (injected into the page) ───────────────────────────
-// Scrolls down in incremental steps so YouTube lazy-loads tiles below the fold.
-
-function autoScrollFn({ steps, stepPx, delayMs }) {
-  return new Promise((resolve) => {
-    let i = 0;
-    const step = () => {
-      if (i >= steps) {
-        resolve();
-        return;
-      }
-      window.scrollBy({ top: stepPx, behavior: "smooth" });
-      i++;
-      setTimeout(step, delayMs);
-    };
-    step();
-  });
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function getYouTubeTab() {
@@ -327,19 +308,6 @@ async function scrapeAndSend() {
   const tab = await getYouTubeTab();
   if (!tab) {
     return { ok: false, reason: "No YouTube tab is currently open." };
-  }
-
-  // Auto-scroll to trigger YouTube's lazy-loading before we scrape
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: autoScrollFn,
-      args: [{ steps: 6, stepPx: 1400, delayMs: 600 }],
-    });
-    // Give the last batch of lazy-loaded tiles time to render
-    await new Promise((r) => setTimeout(r, 800));
-  } catch (_) {
-    // Non-fatal — fall through and scrape whatever is visible
   }
 
   // Execute the scraper in the page context

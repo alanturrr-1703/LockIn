@@ -1,106 +1,85 @@
 package com.youtubewatch;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService; // NOSONAR
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * VideoEnricher
  *
- * Silently fetches a YouTube watch page using Java's built-in HttpClient
- * and extracts the channel name and full description from the JSON blob
- * YouTube embeds inside every page as {@code ytInitialPlayerResponse}.
+ * Fetches channel name and description for a YouTube video without opening
+ * any browser tabs.
  *
- * No extra dependencies — only java.net.http (available since Java 11).
- * No browser tabs are opened.
+ * Strategy
+ * ────────
+ *  Channel name  → YouTube oEmbed API  (JSON, no auth, always reliable)
+ *                  https://www.youtube.com/oembed?url=...&format=json
  *
- * Usage:
- * <pre>
- *   VideoEnricher enricher = new VideoEnricher();
- *   enricher.enrichAsync("dQw4w9WgXcQ")
- *           .thenAccept(data -> {
- *               System.out.println(data.channel());
- *               System.out.println(data.description());
- *           });
- * </pre>
+ *  Description   → youtube.com/watch?v={id}  page fetch
+ *                  Extracts "shortDescription" from the embedded
+ *                  ytInitialPlayerResponse JS object using a char-by-char
+ *                  JSON-string parser (avoids regex backtracking on very
+ *                  long descriptions and correctly handles all escape seqs).
+ *
+ * Threading
+ * ─────────
+ *  A dedicated ExecutorService is created at construction time and passed
+ *  into the HttpClient.  Every sendAsync call runs on this pool so all
+ *  tile fetches truly execute in parallel regardless of the caller's thread.
+ *  Pool size = min(16, availableProcessors × 2).
  */
 public class VideoEnricher {
 
-    // ── Constants ─────────────────────────────────────────────────────────────
+    // ── URL bases ─────────────────────────────────────────────────────────────
 
     private static final String WATCH_BASE = "https://www.youtube.com/watch?v=";
 
-    /**
-     * A realistic desktop Chrome User-Agent string.
-     * YouTube serves a stripped-down page to unrecognised clients which may
-     * omit the embedded JSON entirely, so we must present a known UA.
-     */
+    private static final String OEMBED_BASE =
+        "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=";
+
+    // ── HTTP headers ──────────────────────────────────────────────────────────
+
+    /** Desktop Chrome UA — YouTube returns the full page for known browsers. */
     private static final String USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/124.0.0.0 Safari/537.36";
 
     /**
-     * Matches the channel name embedded in YouTube's page JSON.
-     * Example: {@code "ownerChannelName":"Rick Astley"}
+     * SOCS=CAI bypasses YouTube's GDPR consent interstitial.
+     * Without it, YouTube returns the consent gate HTML which contains no
+     * video metadata at all.
      */
-    private static final Pattern CHANNEL_RE = Pattern.compile(
-        "\"ownerChannelName\":\"([^\"]+)\""
-    );
+    private static final String CONSENT_COOKIE = "CONSENT=YES+cb; SOCS=CAI";
 
-    /**
-     * Matches the short (full) description in YouTube's page JSON.
-     * The value may contain JSON-escaped sequences (\\n, \\", \\/  …).
-     * The inner alternation {@code (?:[^"\\]|\\.)*} handles escaped chars.
-     *
-     * Example: {@code "shortDescription":"Never gonna give you up\\n..."}
-     */
-    private static final Pattern DESC_RE = Pattern.compile(
-        "\"shortDescription\":\"((?:[^\"\\\\]|\\\\.)*)\""
-    );
+    // ── Fallback: meta description tag ───────────────────────────────────────
 
-    /**
-     * Matches the channel name from the microformat section — used as a
-     * secondary source when {@link #CHANNEL_RE} finds nothing (e.g. for
-     * some YouTube Shorts pages).
-     */
-    private static final Pattern CHANNEL_ALT_RE = Pattern.compile(
-        "\"externalChannelId\":\"[^\"]+\"[^}]+\"ownerProfileUrl\":[^}]+\"title\":\"([^\"]+)\""
-    );
-
-    /**
-     * Fallback: channel name sometimes also appears in og:title meta or
-     * in the author meta tag which is simpler to parse.
-     * {@code <link itemprop="name" content="Rick Astley">}
-     */
-    private static final Pattern CHANNEL_META_RE = Pattern.compile(
-        "<link\\s+itemprop=\"name\"\\s+content=\"([^\"]+)\""
-    );
-
-    /**
-     * Fallback description from the {@code <meta name="description">} tag.
-     * Shorter than shortDescription but always present.
-     */
     private static final Pattern DESC_META_RE = Pattern.compile(
         "<meta\\s+name=\"description\"\\s+content=\"([^\"]+)\""
     );
 
+    // ── Jackson ───────────────────────────────────────────────────────────────
+
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+
     // ── Result record ─────────────────────────────────────────────────────────
 
     /**
-     * Immutable carrier for the two fields we enrich.
-     * Both fields are non-null; empty string means "not found".
+     * Immutable result carrier.
+     * Both fields are non-null; empty string means "not found / fetch failed".
      */
     public record EnrichedData(String channel, String description) {
-        /** Sentinel returned when a fetch fails or is skipped. */
         public static final EnrichedData EMPTY = new EnrichedData("", "");
 
-        /** Returns true when at least one field was successfully extracted. */
         public boolean hasData() {
             return !channel.isBlank() || !description.isBlank();
         }
@@ -108,200 +87,292 @@ public class VideoEnricher {
 
     // ── Fields ────────────────────────────────────────────────────────────────
 
+    private final ExecutorService executor;
     private final HttpClient http;
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /**
-     * Creates a VideoEnricher backed by a single shared {@link HttpClient}.
-     * The client is thread-safe and reused across all async calls.
+     * Creates a VideoEnricher with a dedicated thread pool.
+     * Pool size = min(16, availableProcessors × 2) so even modest machines
+     * parallelise effectively while avoiding thread explosion on large batches.
      */
     public VideoEnricher() {
+        int threads = Math.min(
+            16,
+            Runtime.getRuntime().availableProcessors() * 2
+        );
+        this.executor = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r, "enricher-worker");
+            t.setDaemon(true); // don't prevent JVM shutdown
+            return t;
+        });
+
         this.http = HttpClient.newBuilder()
+            .executor(executor)
             .connectTimeout(Duration.ofSeconds(8))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
+
+        System.out.printf(
+            "[VideoEnricher] Initialised — thread pool size: %d%n",
+            threads
+        );
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
-     * Asynchronously fetches {@code youtube.com/watch?v=<videoId>} and
-     * extracts the channel name and description.
+     * Asynchronously fetches the channel name and description for
+     * {@code videoId}.
      *
-     * <p>The returned future <strong>never completes exceptionally</strong> —
-     * any network error, timeout, or parse failure yields
-     * {@link EnrichedData#EMPTY} so callers need no try/catch.</p>
+     * <p>Both the oEmbed request (channel) and the watch-page request
+     * (description) are fired simultaneously and joined with
+     * {@link CompletableFuture#thenCombine}.</p>
      *
-     * @param videoId  The YouTube video ID (e.g. {@code "dQw4w9WgXcQ"}).
-     * @return A {@link CompletableFuture} that resolves to an
-     *         {@link EnrichedData} instance.
+     * <p>This method <strong>never completes exceptionally</strong> —
+     * any error yields {@link EnrichedData#EMPTY}.</p>
+     *
+     * @param videoId YouTube video ID, e.g. {@code "dQw4w9WgXcQ"}
+     * @return Future resolving to an {@link EnrichedData} instance.
      */
     public CompletableFuture<EnrichedData> enrichAsync(String videoId) {
         if (videoId == null || videoId.isBlank()) {
             return CompletableFuture.completedFuture(EnrichedData.EMPTY);
         }
 
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(WATCH_BASE + videoId.trim()))
-            .header("User-Agent", USER_AGENT)
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Accept", "text/html,application/xhtml+xml")
-            .timeout(Duration.ofSeconds(12))
-            .GET()
-            .build();
+        String vid = videoId.trim();
 
-        return http
-            .sendAsync(request, HttpResponse.BodyHandlers.ofString())
-            .thenApply(response -> parse(videoId, response))
+        // Fire both requests in parallel on the dedicated pool
+        CompletableFuture<String> channelFuture = fetchChannel(vid);
+        CompletableFuture<String> descFuture = fetchDescription(vid);
+
+        return channelFuture
+            .thenCombine(descFuture, (channel, desc) -> {
+                EnrichedData result = new EnrichedData(channel, desc);
+                if (result.hasData()) {
+                    System.out.printf(
+                        "[VideoEnricher] ✔ %-14s  channel='%s'  desc=%d chars%n",
+                        vid,
+                        channel,
+                        desc.length()
+                    );
+                } else {
+                    System.err.printf(
+                        "[VideoEnricher] ✘ %-14s  nothing extracted%n",
+                        vid
+                    );
+                }
+                return result;
+            })
             .exceptionally(e -> {
                 System.err.printf(
-                    "[VideoEnricher] Network error for %s: %s%n",
-                    videoId,
+                    "[VideoEnricher] Error for %s: %s%n",
+                    vid,
                     e.getMessage()
                 );
                 return EnrichedData.EMPTY;
             });
     }
 
-    // ── Internal logic ────────────────────────────────────────────────────────
-
     /**
-     * Parses the HTTP response body and extracts channel + description.
-     *
-     * <p>Extraction strategy (each step is tried only if the previous failed):
-     * <ol>
-     *   <li>Channel: {@code "ownerChannelName":"..."} in ytInitialPlayerResponse</li>
-     *   <li>Channel: {@code <link itemprop="name" content="...">} meta tag</li>
-     *   <li>Description: {@code "shortDescription":"..."} in embedded JSON</li>
-     *   <li>Description: {@code <meta name="description" content="...">} tag</li>
-     * </ol>
-     * </p>
+     * Gracefully shuts down the enricher's thread pool.
+     * Call this when the receiver is stopping.
      */
-    private EnrichedData parse(String videoId, HttpResponse<String> response) {
-        if (response.statusCode() != 200) {
-            System.err.printf(
-                "[VideoEnricher] HTTP %d for video %s — skipping enrichment%n",
-                response.statusCode(),
-                videoId
-            );
-            return EnrichedData.EMPTY;
-        }
-
-        String html = response.body();
-
-        // ── Channel name ────────────────────────────────────────────────────
-        String channel = extract(CHANNEL_RE, html, 1);
-
-        if (channel.isEmpty()) {
-            // Secondary: itemprop meta tag
-            channel = extract(CHANNEL_META_RE, html, 1);
-        }
-
-        // ── Description ─────────────────────────────────────────────────────
-        String description = unescapeJson(extract(DESC_RE, html, 1));
-
-        if (description.isEmpty()) {
-            // Fallback: HTML meta description (shorter but always present)
-            description = unescapeHtml(extract(DESC_META_RE, html, 1));
-        }
-
-        if (!channel.isEmpty() || !description.isEmpty()) {
-            System.out.printf(
-                "[VideoEnricher] ✔ %s → channel='%s'  desc=%d chars%n",
-                videoId,
-                channel,
-                description.length()
-            );
-        } else {
-            System.err.printf(
-                "[VideoEnricher] ✘ %s → nothing extracted (page structure may have changed)%n",
-                videoId
-            );
-        }
-
-        return new EnrichedData(channel, description);
+    public void shutdown() {
+        executor.shutdown();
+        System.out.println("[VideoEnricher] Thread pool shut down.");
     }
 
-    // ── Regex helpers ─────────────────────────────────────────────────────────
+    // ── Channel fetch — oEmbed JSON API ───────────────────────────────────────
 
     /**
-     * Applies {@code pattern} to {@code input} and returns capture group
-     * {@code group}, or an empty string if there is no match.
+     * Calls the YouTube oEmbed endpoint and extracts {@code author_name}.
+     *
+     * <p>oEmbed is YouTube's official embed API, requires no auth key, and
+     * returns a small JSON object reliably — far more stable than scraping
+     * the watch page HTML for a channel name.</p>
      */
-    private static String extract(Pattern pattern, String input, int group) {
-        Matcher m = pattern.matcher(input);
-        return m.find() ? m.group(group) : "";
+    private CompletableFuture<String> fetchChannel(String videoId) {
+        String url = OEMBED_BASE + videoId + "&format=json";
+
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("User-Agent", USER_AGENT)
+            .timeout(Duration.ofSeconds(10))
+            .GET()
+            .build();
+
+        return http
+            .sendAsync(req, HttpResponse.BodyHandlers.ofString())
+            .thenApply(resp -> {
+                if (resp.statusCode() != 200) {
+                    System.err.printf(
+                        "[VideoEnricher] oEmbed HTTP %d for %s%n",
+                        resp.statusCode(),
+                        videoId
+                    );
+                    return "";
+                }
+                try {
+                    JsonNode node = JSON_MAPPER.readTree(resp.body());
+                    return node.path("author_name").asText("").trim();
+                } catch (Exception e) {
+                    System.err.printf(
+                        "[VideoEnricher] oEmbed parse error for %s: %s%n",
+                        videoId,
+                        e.getMessage()
+                    );
+                    return "";
+                }
+            })
+            .exceptionally(e -> {
+                System.err.printf(
+                    "[VideoEnricher] oEmbed fetch failed for %s: %s%n",
+                    videoId,
+                    e.getMessage()
+                );
+                return "";
+            });
     }
 
-    // ── Escape helpers ────────────────────────────────────────────────────────
+    // ── Description fetch — watch page ────────────────────────────────────────
 
     /**
-     * Converts JSON escape sequences in a string literal back to readable text.
+     * Fetches {@code youtube.com/watch?v=<videoId>} and extracts the full
+     * description from YouTube's embedded {@code ytInitialPlayerResponse}
+     * JSON object.
      *
-     * <p>YouTube's embedded JSON uses standard JSON escaping, so
-     * {@code \\n} represents a newline, {@code \\"} a quote, etc.</p>
+     * <p>The {@code SOCS=CAI} cookie is sent with the request to bypass
+     * YouTube's GDPR consent gate which would otherwise return a page that
+     * contains no video metadata.</p>
+     *
+     * <p>Falls back to the {@code <meta name="description">} tag when the
+     * embedded JSON is absent or the {@code shortDescription} key is missing.</p>
      */
-    private static String unescapeJson(String s) {
-        if (s == null || s.isEmpty()) return "";
-        // Process two-character escape sequences first
-        StringBuilder sb = new StringBuilder(s.length());
-        int len = s.length();
-        for (int i = 0; i < len; i++) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < len) {
-                char next = s.charAt(i + 1);
-                switch (next) {
-                    case 'n' -> {
-                        sb.append('\n');
-                        i++;
+    private CompletableFuture<String> fetchDescription(String videoId) {
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create(WATCH_BASE + videoId))
+            .header("User-Agent", USER_AGENT)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            )
+            .header("Cookie", CONSENT_COOKIE)
+            .timeout(Duration.ofSeconds(12))
+            .GET()
+            .build();
+
+        return http
+            .sendAsync(req, HttpResponse.BodyHandlers.ofString())
+            .thenApply(resp -> {
+                if (resp.statusCode() != 200) {
+                    System.err.printf(
+                        "[VideoEnricher] Watch page HTTP %d for %s%n",
+                        resp.statusCode(),
+                        videoId
+                    );
+                    return "";
+                }
+
+                String html = resp.body();
+
+                // Primary: shortDescription from embedded JS object
+                String desc = parseShortDescription(html);
+
+                // Fallback: <meta name="description"> (truncated but reliable)
+                if (desc.isBlank()) {
+                    Matcher m = DESC_META_RE.matcher(html);
+                    if (m.find()) {
+                        desc = unescapeHtml(m.group(1));
                     }
-                    case 'r' -> {
-                        sb.append('\r');
-                        i++;
-                    }
-                    case 't' -> {
-                        sb.append('\t');
-                        i++;
-                    }
-                    case '"' -> {
-                        sb.append('"');
-                        i++;
-                    }
-                    case '\\' -> {
-                        sb.append('\\');
-                        i++;
-                    }
-                    case '/' -> {
-                        sb.append('/');
-                        i++;
-                    }
+                }
+
+                return desc;
+            })
+            .exceptionally(e -> {
+                System.err.printf(
+                    "[VideoEnricher] Watch page fetch failed for %s: %s%n",
+                    videoId,
+                    e.getMessage()
+                );
+                return "";
+            });
+    }
+
+    // ── Description parser ────────────────────────────────────────────────────
+
+    /**
+     * Locates the {@code "shortDescription":"..."} key inside YouTube's
+     * embedded {@code ytInitialPlayerResponse} JS object and returns the
+     * decoded string value.
+     *
+     * <p>Uses a character-by-character walk rather than a regex to correctly
+     * handle all JSON escape sequences ({@code \n \t \\ \" \/} and
+     * unicode escapes) and to avoid catastrophic backtracking on descriptions
+     * that are thousands of characters long.</p>
+     *
+     * @param html Raw HTML of the YouTube watch page.
+     * @return Decoded description string, or {@code ""} if not found.
+     */
+    private static String parseShortDescription(String html) {
+        final String MARKER = "\"shortDescription\":\"";
+        int idx = html.indexOf(MARKER);
+        if (idx == -1) return "";
+
+        int start = idx + MARKER.length();
+        int limit = Math.min(start + 50_000, html.length()); // cap at ~50 KB
+        StringBuilder sb = new StringBuilder(512);
+        boolean escaped = false;
+
+        for (int i = start; i < limit; i++) {
+            char c = html.charAt(i);
+
+            if (escaped) {
+                switch (c) {
+                    case 'n' -> sb.append('\n');
+                    case 'r' -> sb.append('\r');
+                    case 't' -> sb.append('\t');
+                    case '"' -> sb.append('"');
+                    case '\\' -> sb.append('\\');
+                    case '/' -> sb.append('/');
+                    case 'b' -> sb.append('\b');
+                    case 'f' -> sb.append('\f');
                     case 'u' -> {
-                        // u+XXXX — four hex digits
-                        if (i + 5 < len) {
-                            String hex = s.substring(i + 2, i + 6);
+                        // 4-hex-digit unicode escape
+                        if (i + 4 < limit) {
+                            String hex = html.substring(i + 1, i + 5);
                             try {
                                 sb.append((char) Integer.parseInt(hex, 16));
-                                i += 5;
+                                i += 4;
                             } catch (NumberFormatException e) {
-                                sb.append(c);
+                                sb.append(c); // not valid hex — keep literally
                             }
                         } else {
                             sb.append(c);
                         }
                     }
-                    default -> sb.append(c);
+                    default -> sb.append(c); // unknown escape — keep as-is
                 }
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                break; // reached the closing quote — we're done
             } else {
                 sb.append(c);
             }
         }
+
         return sb.toString();
     }
 
+    // ── HTML entity decoder ───────────────────────────────────────────────────
+
     /**
-     * Decodes the handful of HTML entities that YouTube uses inside
-     * {@code <meta>} tag content attributes.
+     * Decodes the small set of HTML entities that YouTube uses inside
+     * {@code <meta>} tag {@code content} attributes.
      */
     private static String unescapeHtml(String s) {
         if (s == null || s.isEmpty()) return "";
