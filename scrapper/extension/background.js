@@ -2,7 +2,7 @@
 // since popups close as soon as the user clicks away.
 
 const ALARM_NAME = "yt-scrape-watch";
-const DEFAULT_ENDPOINT = "http://127.0.0.1:8765/tiles";
+const DEFAULT_ENDPOINT = "http://localhost:8080/tiles";
 const DEFAULT_MODE = "lookahead";
 const DEFAULT_INTERVAL_MIN = 0.05;
 
@@ -18,30 +18,43 @@ function scrapeFn({ mode, lookahead }) {
     "ytm-shorts-lockup-view-model",
   ];
   const TITLE_SEL = [
-    "#video-title-link", "a#video-title", "#video-title",
-    "h3 a#video-title-link", "h3 #video-title",
+    "#video-title-link",
+    "a#video-title",
+    "#video-title",
+    "h3 a#video-title-link",
+    "h3 #video-title",
     "yt-formatted-string#video-title",
     "a.yt-lockup-metadata-view-model-wiz__title",
     ".yt-lockup-metadata-view-model-wiz__title span",
     "h3 .yt-core-attributed-string",
   ];
   const CHANNEL_SEL = [
-    "ytd-channel-name #text a", "ytd-channel-name #text", "ytd-channel-name a",
-    "#channel-name #text", "#channel-name a",
-    "#byline a", "#byline", ".ytd-channel-name",
+    "ytd-channel-name #text a",
+    "ytd-channel-name #text",
+    "ytd-channel-name a",
+    "#channel-name #text",
+    "#channel-name a",
+    "#byline a",
+    "#byline",
+    ".ytd-channel-name",
     ".yt-content-metadata-view-model-wiz__metadata-row a",
     ".yt-content-metadata-view-model-wiz__metadata-text",
   ];
   const DESC_SEL = [
-    "#description-text", "yt-formatted-string#description-text",
-    ".metadata-snippet-text", "#description",
+    "#description-text",
+    "yt-formatted-string#description-text",
+    ".metadata-snippet-text",
+    "#description",
   ];
 
   const firstText = (el, list) => {
     for (const sel of list) {
       const node = el.querySelector(sel);
       if (!node) continue;
-      const t = (node.getAttribute && node.getAttribute("title")) || node.textContent || "";
+      const t =
+        (node.getAttribute && node.getAttribute("title")) ||
+        node.textContent ||
+        "";
       const cleaned = t.replace(/\s+/g, " ").trim();
       if (cleaned) return cleaned;
     }
@@ -49,12 +62,16 @@ function scrapeFn({ mode, lookahead }) {
   };
   const firstHref = (el) => {
     const cand = el.querySelector(
-      "a#thumbnail[href], a#video-title-link[href], a#video-title[href], a.yt-lockup-metadata-view-model-wiz__title[href], a[href*='/watch?v='], a[href*='/shorts/']"
+      "a#thumbnail[href], a#video-title-link[href], a#video-title[href], a.yt-lockup-metadata-view-model-wiz__title[href], a[href*='/watch?v='], a[href*='/shorts/']",
     );
     if (!cand) return "";
     const h = cand.getAttribute("href") || "";
     if (!h) return "";
-    try { return new URL(h, location.origin).toString(); } catch (_) { return h; }
+    try {
+      return new URL(h, location.origin).toString();
+    } catch (_) {
+      return h;
+    }
   };
   const videoIdFromUrl = (url) => {
     if (!url) return "";
@@ -74,7 +91,15 @@ function scrapeFn({ mode, lookahead }) {
   };
 
   const vpH = window.innerHeight || document.documentElement.clientHeight;
-  const counts = { viewport_h: vpH, mode, lookahead, page_url: location.href, by_selector: {}, kept: 0, fallback_used: false };
+  const counts = {
+    viewport_h: vpH,
+    mode,
+    lookahead,
+    page_url: location.href,
+    by_selector: {},
+    kept: 0,
+    fallback_used: false,
+  };
   const seenEls = new Set();
   const seenIds = new Set();
   const out = [];
@@ -83,7 +108,8 @@ function scrapeFn({ mode, lookahead }) {
   const passesViewport = (rect) => {
     if (rect.width === 0 && rect.height === 0) return false;
     if (mode === "strict") return rect.bottom > 0 && rect.top < vpH;
-    if (mode === "lookahead") return rect.bottom > 0 && rect.top < vpH + lookahead;
+    if (mode === "lookahead")
+      return rect.bottom > 0 && rect.top < vpH + lookahead;
     return true; // "all"
   };
 
@@ -122,24 +148,32 @@ function scrapeFn({ mode, lookahead }) {
   // Fallback: if structured selectors found nothing, scan every video link and synthesize tiles.
   if (out.length === 0) {
     counts.fallback_used = true;
-    const links = document.querySelectorAll("a[href*='/watch?v='], a[href*='/shorts/']");
+    const links = document.querySelectorAll(
+      "a[href*='/watch?v='], a[href*='/shorts/']",
+    );
     counts.fallback_links = links.length;
     for (const a of links) {
       const url = (() => {
-        try { return new URL(a.getAttribute("href"), location.origin).toString(); }
-        catch (_) { return a.href || ""; }
+        try {
+          return new URL(a.getAttribute("href"), location.origin).toString();
+        } catch (_) {
+          return a.href || "";
+        }
       })();
       const vid = videoIdFromUrl(url);
       if (!vid || seenIds.has(vid)) continue;
 
       // Find the smallest containing card-ish ancestor to read title + channel from.
       let host = a;
-      for (let i = 0; i < 6 && host && host !== document.body; i++) host = host.parentElement;
+      for (let i = 0; i < 6 && host && host !== document.body; i++)
+        host = host.parentElement;
       const card = host || a.parentElement || a;
 
       if (!passesViewport(card.getBoundingClientRect())) continue;
 
-      const title = (a.getAttribute("title") || a.textContent || "").replace(/\s+/g, " ").trim();
+      const title = (a.getAttribute("title") || a.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
       const channel = firstText(card, CHANNEL_SEL);
       if (!title && !channel) continue;
 
@@ -160,7 +194,9 @@ function scrapeFn({ mode, lookahead }) {
 
   counts.kept = out.length;
   // Dump counts to the page console so the user can verify in DevTools.
-  try { console.log("[YT Tile Scraper] counts:", counts); } catch (_) {}
+  try {
+    console.log("[YT Tile Scraper] counts:", counts);
+  } catch (_) {}
   return { tiles: out, counts };
 }
 
@@ -175,7 +211,8 @@ async function getYouTubeTab() {
 }
 
 async function scrapeAndSend() {
-  const { endpoint = DEFAULT_ENDPOINT, mode = DEFAULT_MODE } = await chrome.storage.local.get(["endpoint", "mode"]);
+  const { endpoint = DEFAULT_ENDPOINT, mode = DEFAULT_MODE } =
+    await chrome.storage.local.get(["endpoint", "mode"]);
   const tab = await getYouTubeTab();
   if (!tab) {
     return { ok: false, reason: "No YouTube tab open." };
@@ -195,10 +232,18 @@ async function scrapeAndSend() {
   const counts = scrapeResult.counts || {};
 
   if (tiles.length === 0) {
-    const breakdown = Object.entries(counts.by_selector || {}).filter(([, n]) => n > 0).map(([k, v]) => `${k}:${v}`).join(", ");
-    const fb = counts.fallback_used ? ` fallback_links=${counts.fallback_links || 0}` : "";
+    const breakdown = Object.entries(counts.by_selector || {})
+      .filter(([, n]) => n > 0)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(", ");
+    const fb = counts.fallback_used
+      ? ` fallback_links=${counts.fallback_links || 0}`
+      : "";
     return {
-      ok: true, sent: 0, accepted: 0, counts,
+      ok: true,
+      sent: 0,
+      accepted: 0,
+      counts,
       reason: `0 tiles. selectors=[${breakdown || "none matched"}]${fb}. mode=${counts.mode} vp=${counts.viewport_h}. URL=${counts.page_url}`,
     };
   }
@@ -208,12 +253,18 @@ async function scrapeAndSend() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tiles, page_url: tab.url }),
     });
-    if (!resp.ok) return { ok: false, reason: `Receiver returned ${resp.status}.`, counts };
+    if (!resp.ok)
+      return { ok: false, reason: `Receiver returned ${resp.status}.`, counts };
     const data = await resp.json().catch(() => ({}));
-    const accepted = typeof data.accepted === "number" ? data.accepted : tiles.length;
+    const accepted =
+      typeof data.accepted === "number" ? data.accepted : tiles.length;
     return { ok: true, sent: tiles.length, accepted, counts };
   } catch (e) {
-    return { ok: false, reason: `Receiver unreachable (${e.message}). Is yt_receiver.py running on ${endpoint}?`, counts };
+    return {
+      ok: false,
+      reason: `Receiver unreachable (${e.message}). Is yt_receiver.py running on ${endpoint}?`,
+      counts,
+    };
   }
 }
 
@@ -228,10 +279,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.cmd === "scrape") {
       sendResponse(await scrapeAndSend());
     } else if (msg && msg.cmd === "watch-start") {
-      const minutes = Math.max(0.05, Number(msg.intervalMinutes) || DEFAULT_INTERVAL_MIN);
+      const minutes = Math.max(
+        0.05,
+        Number(msg.intervalMinutes) || DEFAULT_INTERVAL_MIN,
+      );
       await chrome.alarms.create(ALARM_NAME, { periodInMinutes: minutes });
       const result = await scrapeAndSend();
-      await chrome.storage.local.set({ watchOn: true, lastResult: result, lastAt: Date.now() });
+      await chrome.storage.local.set({
+        watchOn: true,
+        lastResult: result,
+        lastAt: Date.now(),
+      });
       sendResponse({ ok: true, watchOn: true, immediate: result });
     } else if (msg && msg.cmd === "watch-stop") {
       await chrome.alarms.clear(ALARM_NAME);
