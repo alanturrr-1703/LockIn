@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "YT Tile Scraper",
+  "version": "1.0.0",
+  "description": "Scrape YouTube video-tile metadata and POST it to the local Java receiver on port 8765.",
+  "permissions": ["activeTab", "scripting", "storage", "alarms", "tabs"],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "YT Tile Scraper",
+    "default_popup": "popup.html"
+  }
+}

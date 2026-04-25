@@ -1,0 +1,215 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <style>
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            body {
+                font:
+                    13px/1.4 system-ui,
+                    sans-serif;
+                width: 300px;
+                background: #0f0f0f;
+                color: #e0e0e0;
+                padding: 14px;
+            }
+
+            /* ── Header ── */
+            .header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 14px;
+                border-bottom: 1px solid #272727;
+                padding-bottom: 10px;
+            }
+            .header-icon {
+                font-size: 20px;
+                line-height: 1;
+            }
+            .header h1 {
+                font-size: 14px;
+                font-weight: 700;
+                color: #ffffff;
+            }
+            .header .version {
+                font-size: 10px;
+                color: #717171;
+                margin-left: auto;
+            }
+
+            /* ── Form rows ── */
+            label {
+                display: block;
+                margin-bottom: 10px;
+            }
+            .label-text {
+                font-size: 11px;
+                font-weight: 600;
+                color: #aaaaaa;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                margin-bottom: 4px;
+            }
+            input[type="text"],
+            select {
+                width: 100%;
+                background: #1c1c1c;
+                border: 1px solid #333;
+                border-radius: 6px;
+                color: #e0e0e0;
+                font:
+                    12px system-ui,
+                    sans-serif;
+                padding: 6px 8px;
+                outline: none;
+                transition: border-color 0.15s;
+            }
+            input[type="text"]:focus,
+            select:focus {
+                border-color: #ff0000;
+            }
+            select option {
+                background: #1c1c1c;
+            }
+
+            /* ── Buttons ── */
+            .btn-row {
+                display: flex;
+                gap: 8px;
+                margin-top: 12px;
+            }
+            button {
+                flex: 1;
+                padding: 8px 6px;
+                border: none;
+                border-radius: 6px;
+                font:
+                    600 12px system-ui,
+                    sans-serif;
+                cursor: pointer;
+                transition:
+                    opacity 0.15s,
+                    background 0.15s;
+            }
+            button:active {
+                opacity: 0.75;
+            }
+            #scrape {
+                background: #ff0000;
+                color: #ffffff;
+            }
+            #scrape:hover {
+                background: #cc0000;
+            }
+            #watch {
+                background: #272727;
+                color: #e0e0e0;
+                border: 1px solid #444;
+            }
+            #watch:hover {
+                background: #333;
+            }
+            #watch.active {
+                background: #1a3a1a;
+                color: #4caf50;
+                border-color: #4caf50;
+            }
+
+            /* ── Status ── */
+            #status {
+                margin-top: 12px;
+                min-height: 32px;
+                font-size: 11px;
+                color: #aaaaaa;
+                background: #1c1c1c;
+                border: 1px solid #272727;
+                border-radius: 6px;
+                padding: 6px 8px;
+                white-space: pre-wrap;
+                word-break: break-all;
+                line-height: 1.5;
+            }
+            #status.ok {
+                color: #4caf50;
+                border-color: #2a4a2a;
+            }
+            #status.error {
+                color: #f44336;
+                border-color: #4a2a2a;
+            }
+            #status.busy {
+                color: #ffb300;
+                border-color: #4a3a00;
+            }
+
+            /* ── Footer hint ── */
+            .footer {
+                margin-top: 10px;
+                font-size: 10px;
+                color: #555;
+                text-align: center;
+            }
+            .footer code {
+                background: #1c1c1c;
+                padding: 1px 4px;
+                border-radius: 3px;
+                font-size: 10px;
+                color: #888;
+            }
+        </style>
+    </head>
+    <body>
+        <!-- Header -->
+        <div class="header">
+            <span class="header-icon">📡</span>
+            <h1>YT Tile Scraper</h1>
+            <span class="version">v0.2.0</span>
+        </div>
+
+        <!-- Scrape mode -->
+        <label>
+            <div class="label-text">Scrape Mode</div>
+            <select id="mode">
+                <option value="lookahead" selected>
+                    Lookahead — 3000 px below fold
+                </option>
+                <option value="strict">Strict — visible tiles only</option>
+                <option value="all">All — entire DOM</option>
+            </select>
+        </label>
+
+        <!-- Receiver endpoint -->
+        <label>
+            <div class="label-text">Receiver Endpoint</div>
+            <input
+                id="endpoint"
+                type="text"
+                value="http://localhost:8765/tiles"
+                spellcheck="false"
+            />
+        </label>
+
+        <!-- Action buttons -->
+        <div class="btn-row">
+            <button id="scrape">▶ Scrape now</button>
+            <button id="watch">⏺ Watch: off</button>
+        </div>
+
+        <!-- Status line -->
+        <div id="status">Ready.</div>
+
+        <!-- Footer -->
+        <div class="footer">
+            Java receiver:
+            <code>./gradlew runReceiver</code>
+        </div>
+
+        <script src="popup.js"></script>
+    </body>
+</html>

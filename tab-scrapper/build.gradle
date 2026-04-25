@@ -1,0 +1,99 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.youtubewatch'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Selenium 4 - browser automation
+    implementation 'org.seleniumhq.selenium:selenium-java:4.21.0'
+
+    // WebDriverManager - automatic ChromeDriver management
+    implementation 'io.github.bonigarcia:webdrivermanager:5.9.2'
+
+    // Jackson Databind - JSON serialization / deserialization
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.1'
+
+    // SLF4J simple binding to suppress verbose WebDriverManager log noise
+    implementation 'org.slf4j:slf4j-simple:2.0.13'
+}
+
+application {
+    // Default entry point — overridden by the individual tasks below
+    mainClass = 'com.youtubewatch.YouTubeMonitor'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_24
+    targetCompatibility = JavaVersion.VERSION_24
+}
+
+// ── ./gradlew run  →  Selenium YouTube monitor ────────────────────────────────
+run {
+    description = 'Launch the Selenium YouTube monitor (opens a real Chrome window).'
+    standardInput = System.in
+
+    // ./gradlew run -Ptags="gaming,violence"
+    if (project.hasProperty('tags')) {
+        jvmArgs "-Dforbidden.tags=${project.property('tags')}"
+    }
+
+    // ./gradlew run -Purl="https://www.youtube.com/watch?v=..."
+    if (project.hasProperty('url')) {
+        jvmArgs "-Dstart.url=${project.property('url')}"
+    }
+}
+
+// ── ./gradlew runReceiver  →  HTTP tile receiver for the Chrome extension ─────
+tasks.register('runReceiver', JavaExec) {
+    group       = 'application'
+    description = 'Start the Java HTTP tile receiver on http://127.0.0.1:8765/tiles'
+    classpath   = sourceSets.main.runtimeClasspath
+    mainClass   = 'com.youtubewatch.TileReceiver'
+    standardInput = System.in
+
+    // ./gradlew runReceiver -Pport=9000
+    if (project.hasProperty('port')) {
+        args '--port', project.property('port')
+    }
+}
+
+// ── ./gradlew runMonitor  →  explicit alias for the Selenium monitor ──────────
+tasks.register('runMonitor', JavaExec) {
+    group       = 'application'
+    description = 'Alias for the Selenium YouTube monitor (same as ./gradlew run).'
+    classpath   = sourceSets.main.runtimeClasspath
+    mainClass   = 'com.youtubewatch.YouTubeMonitor'
+    standardInput = System.in
+
+    if (project.hasProperty('tags')) {
+        jvmArgs "-Dforbidden.tags=${project.property('tags')}"
+    }
+    if (project.hasProperty('url')) {
+        jvmArgs "-Dstart.url=${project.property('url')}"
+    }
+}
+
+// ── Fat / shadow-style uber-jar ───────────────────────────────────────────────
+// Build with:  ./gradlew jar
+// Run monitor: java -cp build/libs/youtube-monitor-1.0.0.jar com.youtubewatch.YouTubeMonitor
+// Run receiver: java -cp build/libs/youtube-monitor-1.0.0.jar com.youtubewatch.TileReceiver
+jar {
+    archiveFileName = "${rootProject.name}-${version}.jar"
+    manifest {
+        // Default main class in the fat-jar is the monitor; use -cp to pick the other
+        attributes 'Main-Class': 'com.youtubewatch.YouTubeMonitor'
+    }
+    from {
+        configurations.runtimeClasspath.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
