@@ -24,6 +24,13 @@ async function loadSettings() {
     "watchOn",
     "lastResult",
   ]);
+
+  // Migrate: any stored endpoint that isn't /tiles → force to /tiles
+  if (s.endpoint && !s.endpoint.endsWith("/tiles")) {
+    s.endpoint = "http://localhost:8080/tiles";
+    chrome.storage.local.set({ endpoint: s.endpoint });
+  }
+
   if (s.endpoint) $("endpoint").value = s.endpoint;
   if (s.mode) $("mode").value = s.mode;
   setWatchButton(!!s.watchOn);
@@ -39,8 +46,19 @@ function saveSettings() {
 
 // ── Health check ──────────────────────────────────────────────────────────────
 
+// Extract just the origin (scheme + host + port) from any endpoint URL.
+// Works regardless of whether the path is /tiles, /scrape, or anything else.
+function getOrigin(endpoint) {
+  try {
+    return new URL(endpoint).origin; // e.g. "http://localhost:8080"
+  } catch {
+    // Fallback: strip everything after the last slash-segment
+    return endpoint.replace(/\/[^/]*$/, "") || endpoint;
+  }
+}
+
 async function checkHealth(endpoint) {
-  const base = endpoint.replace(/\/tiles\/?$/, "");
+  const base = getOrigin(endpoint);
   try {
     const resp = await fetch(`${base}/health`, {
       signal: AbortSignal.timeout(3000),
@@ -85,9 +103,7 @@ function showStats(result) {
 }
 
 async function refreshStoredCount() {
-  const endpoint = $("endpoint")
-    .value.trim()
-    .replace(/\/tiles\/?$/, "");
+  const endpoint = getOrigin($("endpoint").value.trim());
   try {
     const resp = await fetch(`${endpoint}/tiles/export`, {
       signal: AbortSignal.timeout(3000),
@@ -197,9 +213,7 @@ async function toggleWatch() {
 // ── View all tiles ────────────────────────────────────────────────────────────
 
 function viewAll() {
-  const base = $("endpoint")
-    .value.trim()
-    .replace(/\/tiles\/?$/, "");
+  const base = getOrigin($("endpoint").value.trim());
   chrome.tabs.create({ url: `${base}/tiles` });
 }
 
