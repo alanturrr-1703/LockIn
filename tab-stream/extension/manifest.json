@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Stream",
+  "version": "1.0.0",
+  "description": "Capture and stream active browser tab to Java backend. Supports REST and WebSocket modes with optional live streaming.",
+  "permissions": ["activeTab", "scripting", "storage", "tabs", "alarms"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost:8081/*",
+    "http://127.0.0.1:8081/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Tab Stream",
+    "default_popup": "popup.html"
+  }
+}

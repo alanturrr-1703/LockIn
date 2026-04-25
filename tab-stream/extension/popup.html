@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tab Stream</title>
+  <style>
+    /* ── CSS Variables ───────────────────────────────────────────────── */
+    :root {
+      --bg-primary:     #0d0d0d;
+      --bg-secondary:   #1a1a1a;
+      --bg-tertiary:    #242424;
+      --bg-hover:       #2e2e2e;
+      --border:         #2e2e2e;
+      --border-focus:   #4a4a4a;
+
+      --text-primary:   #f0f0f0;
+      --text-secondary: #9a9a9a;
+      --text-muted:     #5a5a5a;
+
+      --accent-blue:    #3b82f6;
+      --accent-blue-h:  #2563eb;
+      --accent-green:   #22c55e;
+      --accent-green-h: #16a34a;
+      --accent-red:     #ef4444;
+      --accent-amber:   #f59e0b;
+
+      --dot-size:       9px;
+      --radius-sm:      6px;
+      --radius-md:      8px;
+      --radius-pill:    999px;
+
+      --font:           -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --mono:           "SF Mono", "Fira Code", "Consolas", monospace;
+
+      --transition:     0.15s ease;
+    }
+
+    /* ── Reset ───────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Base ────────────────────────────────────────────────────────── */
+    body {
+      width: 360px;
+      min-height: 200px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.5;
+      user-select: none;
+    }
+
+    /* ── Layout wrapper ──────────────────────────────────────────────── */
+    .popup {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    /* ── Section divider ─────────────────────────────────────────────── */
+    .section {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section:last-child { border-bottom: none; }
+
+    /* ── Header ──────────────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 14px 11px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-secondary);
+    }
+
+    .dot {
+      width: var(--dot-size);
+      height: var(--dot-size);
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background-color var(--transition), box-shadow var(--transition);
+    }
+    .dot.online  {
+      background: var(--accent-green);
+      box-shadow: 0 0 6px var(--accent-green);
+    }
+    .dot.offline {
+      background: var(--accent-red);
+      box-shadow: 0 0 6px var(--accent-red);
+    }
+    .dot.checking {
+      background: var(--accent-amber);
+      box-shadow: 0 0 6px var(--accent-amber);
+      animation: pulse 1.2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    .header-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      letter-spacing: 0.01em;
+      flex: 1;
+    }
+
+    .header-version {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+
+    /* ── Mode selector ───────────────────────────────────────────────── */
+    .mode-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .pill {
+      flex: 1;
+      padding: 6px 10px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: center;
+      transition: background var(--transition), color var(--transition),
+                  border-color var(--transition), box-shadow var(--transition);
+    }
+    .pill:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--border-focus);
+    }
+    .pill.active {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: #fff;
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.2);
+    }
+
+    /* ── Buttons ─────────────────────────────────────────────────────── */
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 100%;
+      padding: 8px 12px;
+      border-radius: var(--radius-md);
+      border: none;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background var(--transition), opacity var(--transition),
+                  box-shadow var(--transition);
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-blue-h);
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.25);
+    }
+
+    .btn-stream {
+      background: var(--accent-green);
+      color: #fff;
+    }
+    .btn-stream:hover:not(:disabled) {
+      background: var(--accent-green-h);
+      box-shadow: 0 0 0 3px rgba(34,197,94,0.25);
+    }
+    .btn-stream.active {
+      background: var(--accent-red);
+    }
+    .btn-stream.active:hover:not(:disabled) {
+      background: #dc2626;
+      box-shadow: 0 0 0 3px rgba(239,68,68,0.25);
+    }
+
+    /* ── Section label ───────────────────────────────────────────────── */
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    /* ── Live stream controls ────────────────────────────────────────── */
+    .stream-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .control-row label {
+      color: var(--text-secondary);
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+
+    .select {
+      flex: 1;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-size: 12px;
+      padding: 5px 8px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color var(--transition);
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%235a5a5a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 8px center;
+      padding-right: 24px;
+    }
+    .select:focus { border-color: var(--border-focus); }
+    .select option { background: var(--bg-secondary); }
+
+    /* ── Checkbox row ────────────────────────────────────────────────── */
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .checkbox-row input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      accent-color: var(--accent-blue);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .checkbox-row span {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* ── WebSocket badge ─────────────────────────────────────────────── */
+    #ws-section {
+      display: none;
+    }
+
+    .ws-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .ws-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .ws-badge {
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: var(--radius-pill);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      transition: background var(--transition), color var(--transition);
+    }
+    .ws-badge.state-connecting {
+      background: rgba(245,158,11,0.15);
+      color: var(--accent-amber);
+      border: 1px solid rgba(245,158,11,0.3);
+    }
+    .ws-badge.state-open {
+      background: rgba(34,197,94,0.15);
+      color: var(--accent-green);
+      border: 1px solid rgba(34,197,94,0.3);
+    }
+    .ws-badge.state-closed, .ws-badge.state-unknown {
+      background: rgba(239,68,68,0.12);
+      color: var(--accent-red);
+      border: 1px solid rgba(239,68,68,0.25);
+    }
+    .ws-badge.state-closing {
+      background: rgba(245,158,11,0.1);
+      color: var(--accent-amber);
+      border: 1px solid rgba(245,158,11,0.25);
+    }
+
+    /* ── Status bar ──────────────────────────────────────────────────── */
+    #status-bar {
+      font-size: 12px;
+      min-height: 20px;
+      padding: 0 2px;
+      transition: color var(--transition);
+      word-break: break-word;
+    }
+    #status-bar.ok     { color: var(--accent-green); }
+    #status-bar.error  { color: var(--accent-red); }
+    #status-bar.busy   { color: var(--accent-amber); }
+    #status-bar.empty  { color: var(--text-muted); }
+
+    /* ── Stats row ───────────────────────────────────────────────────── */
+    .stats-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .stat-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .stat-label {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .stat-value {
+      font-size: 12px;
+      font-family: var(--mono);
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    /* ── Footer ──────────────────────────────────────────────────────── */
+    .footer {
+      padding: 9px 14px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .link {
+      font-size: 11px;
+      color: var(--accent-blue);
+      text-decoration: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: color var(--transition);
+    }
+    .link:hover { color: #93c5fd; text-decoration: underline; }
+
+    /* ── Spinner icon ────────────────────────────────────────────────── */
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="popup">
+
+    <!-- ── Header ─────────────────────────────────────────────────── -->
+    <div class="header">
+      <div class="dot checking" id="status-dot"></div>
+      <span class="header-title">Tab Stream</span>
+      <span class="header-version">v1.0.0</span>
+    </div>
+
+    <!-- ── Mode selector ──────────────────────────────────────────── -->
+    <div class="section">
+      <div class="section-label">Transport Mode</div>
+      <div class="mode-row">
+        <button class="pill active" id="pill-rest">REST</button>
+        <button class="pill"        id="pill-ws">WebSocket</button>
+      </div>
+    </div>
+
+    <!-- ── Send Once ──────────────────────────────────────────────── -->
+    <div class="section">
+      <button class="btn btn-primary" id="btn-send-once">
+        ↑ Send Once
+      </button>
+    </div>
+
+    <!-- ── Live Stream ────────────────────────────────────────────── -->
+    <div class="section">
+      <div class="section-label">Live Stream</div>
+      <div class="stream-controls">
+
+        <div class="control-row">
+          <label for="interval-select">Interval</label>
+          <select class="select" id="interval-select">
+            <option value="3000">3 seconds</option>
+            <option value="5000" selected>5 seconds</option>
+            <option value="10000">10 seconds</option>
+            <option value="30000">30 seconds</option>
+            <option value="60000">1 minute</option>
+          </select>
+        </div>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="mutation-checkbox" />
+          <span>Use MutationObserver (DOM-change based)</span>
+        </label>
+
+        <button class="btn btn-stream" id="btn-stream">
+          ▶ Start Streaming
+        </button>
+
+      </div>
+    </div>
+
+    <!-- ── WebSocket status ───────────────────────────────────────── -->
+    <div class="section" id="ws-section">
+      <div class="ws-row">
+        <span class="ws-label">WebSocket connection</span>
+        <span class="ws-badge state-unknown" id="ws-badge">UNKNOWN</span>
+      </div>
+    </div>
+
+    <!-- ── Status bar ─────────────────────────────────────────────── -->
+    <div class="section">
+      <div id="status-bar" class="empty">Ready</div>
+    </div>
+
+    <!-- ── Stats row ──────────────────────────────────────────────── -->
+    <div class="section">
+      <div class="stats-row">
+        <div class="stat-item">
+          <span class="stat-label">Stored:</span>
+          <span class="stat-value" id="stored-count">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Backend:</span>
+          <span class="stat-value" id="backend-label">localhost:8081</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Footer ─────────────────────────────────────────────────── -->
+    <div class="footer">
+      <a class="link" id="link-history">
+        ☰ View History
+      </a>
+    </div>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
