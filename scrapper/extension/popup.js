@@ -1,5 +1,7 @@
 const $ = (id) => document.getElementById(id);
-const setStatus = (msg) => { $("status").textContent = msg; };
+const setStatus = (msg) => {
+  $("status").textContent = msg;
+};
 
 function setWatchButton(on) {
   $("watch").textContent = on ? "Watch on (stop)" : "Watch off";
@@ -26,21 +28,45 @@ async function toggleWatch() {
     setStatus(r && r.ok ? "Watch stopped." : "Failed to stop watch.");
   } else {
     setStatus("Starting watch...");
-    const r = await chrome.runtime.sendMessage({ cmd: "watch-start", intervalMinutes: 0.05 });
+    const r = await chrome.runtime.sendMessage({
+      cmd: "watch-start",
+      intervalMinutes: 0.05,
+    });
     setWatchButton(true);
     setStatus("Watch on. " + describe(r && r.immediate));
   }
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const stored = await chrome.storage.local.get(["endpoint", "mode", "watchOn", "lastResult"]);
+  const stored = await chrome.storage.local.get([
+    "endpoint",
+    "mode",
+    "watchOn",
+    "lastResult",
+  ]);
+
+  // Migrate: if the stored endpoint still points at the old Python backend,
+  // silently upgrade it to the Java backend so the user doesn't have to.
+  if (
+    stored.endpoint &&
+    (stored.endpoint.includes("8765") ||
+      stored.endpoint.includes("yt_receiver"))
+  ) {
+    stored.endpoint = "http://localhost:8080/tiles";
+    chrome.storage.local.set({ endpoint: stored.endpoint });
+  }
+
   if (stored.endpoint) $("endpoint").value = stored.endpoint;
   if (stored.mode) $("mode").value = stored.mode;
   setWatchButton(!!stored.watchOn);
   if (stored.lastResult) setStatus(describe(stored.lastResult));
 
-  $("endpoint").addEventListener("change", () => chrome.storage.local.set({ endpoint: $("endpoint").value }));
-  $("mode").addEventListener("change", () => chrome.storage.local.set({ mode: $("mode").value }));
+  $("endpoint").addEventListener("change", () =>
+    chrome.storage.local.set({ endpoint: $("endpoint").value }),
+  );
+  $("mode").addEventListener("change", () =>
+    chrome.storage.local.set({ mode: $("mode").value }),
+  );
   $("scrape").addEventListener("click", scrape);
   $("watch").addEventListener("click", toggleWatch);
 });
