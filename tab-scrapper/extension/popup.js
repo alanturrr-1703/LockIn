@@ -33,7 +33,7 @@ async function toggleWatch() {
     setStatus("Starting watch...");
     const r = await chrome.runtime.sendMessage({
       cmd: "watch-start",
-      intervalMinutes: 0.05,
+      intervalMinutes: 0.5,
     });
     setWatchButton(true);
     setStatus("Watch on. " + describe(r && r.immediate));

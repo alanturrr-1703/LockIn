@@ -4,14 +4,9 @@
 const ALARM_NAME = "yt-scrape-watch";
 const DEFAULT_ENDPOINT = "http://127.0.0.1:8765/tiles";
 const DEFAULT_MODE = "lookahead";
-const DEFAULT_INTERVAL_MIN = 0.05;
-const DEFAULT_MODEL_SETTINGS = {
-  enabled: false,
-  endpoint:
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-  model: "gemini-2.5-flash",
-  apiKey: "",
-};
+const DEFAULT_INTERVAL_MIN = 0.5;
+const OLLAMA_ENDPOINT = "http://localhost:11434/api/chat";
+const OLLAMA_MODEL = "llama3.2:3b";
 
 const DEFAULT_PROFILE = {
   id: "default-profile",
@@ -30,7 +25,7 @@ const DEFAULT_PROFILE = {
   active: true,
 };
 
-const MODEL_CHUNK_SIZE = 16;
+const MODEL_CHUNK_SIZE = 4; // 4 tiles per concurrent chat → up to 6 parallel requests for 24 tiles
 
 function makeId(prefix) {
   if (crypto && typeof crypto.randomUUID === "function") {
@@ -95,7 +90,6 @@ async function loadSettings() {
     "lastAt",
     "profiles",
     "activeProfileId",
-    "modelSettings",
   ]);
   const profiles =
     Array.isArray(stored.profiles) && stored.profiles.length
@@ -108,18 +102,6 @@ async function loadSettings() {
   );
   const activeProfile =
     profiles.find((p) => p.id === activeProfileId) || profiles[0];
-  const modelSettings = {
-    ...DEFAULT_MODEL_SETTINGS,
-    ...(stored.modelSettings || {}),
-  };
-  modelSettings.enabled = !!modelSettings.enabled;
-  modelSettings.endpoint = String(
-    modelSettings.endpoint || DEFAULT_MODEL_SETTINGS.endpoint,
-  ).trim();
-  modelSettings.model = String(
-    modelSettings.model || DEFAULT_MODEL_SETTINGS.model,
-  ).trim();
-  modelSettings.apiKey = String(modelSettings.apiKey || "");
   return {
     endpoint: stored.endpoint || DEFAULT_ENDPOINT,
     mode: stored.mode || DEFAULT_MODE,
@@ -130,7 +112,6 @@ async function loadSettings() {
     profiles,
     activeProfileId,
     activeProfile,
-    modelSettings,
   };
 }
 
@@ -195,94 +176,27 @@ function heuristicIrrelevant(tile, profile, fallbackTopic) {
   return !tags.some((tag) => tag && text.includes(tag));
 }
 
-async function callChatCompletion(modelSettings, messages) {
-  const endpoint = String(modelSettings.endpoint || "").trim();
-  const apiKey = String(modelSettings.apiKey || "").trim();
-  const isGemini = /generativelanguage\.googleapis\.com|:generateContent/i.test(
-    endpoint,
-  );
-
-  if (isGemini) {
-    const systemPrompt = messages
-      .filter((m) => m && m.role === "system")
-      .map((m) => String(m.content || "").trim())
-      .filter(Boolean)
-      .join("\n\n");
-    const userPrompt = messages
-      .filter((m) => m && m.role !== "system")
-      .map((m) => String(m.content || "").trim())
-      .filter(Boolean)
-      .join("\n\n");
-
-    const url = (() => {
-      try {
-        const u = new URL(endpoint);
-        if (apiKey && !u.searchParams.get("key"))
-          u.searchParams.set("key", apiKey);
-        return u.toString();
-      } catch (_) {
-        return endpoint;
-      }
-    })();
-
-    const geminiPayload = {
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: { temperature: 0 },
-    };
-    if (systemPrompt) {
-      geminiPayload.systemInstruction = { parts: [{ text: systemPrompt }] };
-    }
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(geminiPayload),
-    });
-    if (!resp.ok) throw new Error(`Model endpoint returned ${resp.status}`);
-    const data = await resp.json();
-    const parts =
-      data &&
-      data.candidates &&
-      data.candidates[0] &&
-      data.candidates[0].content &&
-      data.candidates[0].content.parts;
-    const content = Array.isArray(parts)
-      ? parts
-          .map((p) => String(p && p.text ? p.text : ""))
-          .join("\n")
-          .trim()
-      : "";
-    if (!content)
-      throw new Error("Model response did not include text content");
-    return content;
-  }
-
-  const resp = await fetch(modelSettings.endpoint, {
+async function callChatCompletion(messages) {
+  const resp = await fetch(OLLAMA_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: modelSettings.model,
+      model: OLLAMA_MODEL,
       messages,
-      temperature: 0,
+      stream: false,
     }),
   });
-  if (!resp.ok) throw new Error(`Model endpoint returned ${resp.status}`);
+  if (!resp.ok) throw new Error(`Ollama returned ${resp.status}`);
   const data = await resp.json();
   const content =
-    data &&
-    data.choices &&
-    data.choices[0] &&
-    data.choices[0].message &&
-    data.choices[0].message.content;
-  if (typeof content !== "string")
-    throw new Error("Model response did not include text content");
+    data && data.message && typeof data.message.content === "string"
+      ? data.message.content.trim()
+      : "";
+  if (!content) throw new Error("Ollama response has no content");
   return content;
 }
 
-async function suggestTags(profile, modelSettings, fallbackTopic) {
+async function suggestTags(profile, fallbackTopic) {
   const summary = profilePrompt(profile, fallbackTopic);
   const seedTags = uniqStrings(summary.tags);
   const fallback = uniqStrings([
@@ -290,15 +204,8 @@ async function suggestTags(profile, modelSettings, fallbackTopic) {
     ...topicWords(summary.name),
     ...topicWords(summary.description),
   ]).slice(0, 12);
-  if (
-    !modelSettings.enabled ||
-    !modelSettings.apiKey ||
-    !modelSettings.endpoint
-  ) {
-    return fallback;
-  }
   try {
-    const content = await callChatCompletion(modelSettings, [
+    const content = await callChatCompletion([
       { role: "system", content: "Return valid JSON only." },
       {
         role: "user",
@@ -317,32 +224,27 @@ async function suggestTags(profile, modelSettings, fallbackTopic) {
       .slice(0, 12)
       .concat(fallback)
       .slice(0, 12);
-  } catch (_) {
+  } catch (err) {
+    console.warn(
+      "[LockIn] Ollama tag suggestion failed:",
+      String(err?.message || ""),
+    );
     return fallback;
   }
 }
 
-// ── Classification cache (TTL-aware) + exponential backoff ──────────────────
+// ── Classification cache (TTL-aware) ────────────────────────────────────────
 //
 // Cache format:  { [item_key]: { v: boolean, exp: number } }
 //   v   – true = irrelevant (block), false = relevant (allow)
 //   exp – epoch-ms after which this entry is treated as fresh again.
 //         0 means "permanent" (never re-classify).
 //
-// Backoff format: { until: number, count: number }
-//   until – epoch-ms before which ALL Gemini calls are suppressed.
-//   count – how many 429s in a row (used for exponential delay).
-//
-// Both are stored in chrome.storage.local so they survive SW restarts.
+// Stored in chrome.storage.local so verdicts survive service-worker restarts.
+// Ollama is local so there are no rate limits — failed batches fall back to
+// the heuristic filter and are not cached, allowing a retry next scrape cycle.
 
 const CACHE_KEY = "classificationCache";
-const BACKOFF_KEY = "geminiBackoff";
-
-// Delays used for successive 429s: 30 s → 60 s → 2 min → 5 min → 10 min
-const BACKOFF_DELAYS = [30_000, 60_000, 120_000, 300_000, 600_000];
-
-// Tiles that 429-failed are cached as "allowed" for this long before retry.
-const FAILED_TTL_MS = 5 * 60_000; // 5 minutes
 
 async function loadCache() {
   const s = await chrome.storage.local.get(CACHE_KEY);
@@ -353,27 +255,7 @@ async function saveCache(cache) {
   await chrome.storage.local.set({ [CACHE_KEY]: cache });
 }
 
-async function loadBackoff() {
-  const s = await chrome.storage.local.get(BACKOFF_KEY);
-  return (s && s[BACKOFF_KEY]) || { until: 0, count: 0 };
-}
-
-async function recordBackoff() {
-  const b = await loadBackoff();
-  const delay = BACKOFF_DELAYS[Math.min(b.count, BACKOFF_DELAYS.length - 1)];
-  const next = { until: Date.now() + delay, count: b.count + 1 };
-  await chrome.storage.local.set({ [BACKOFF_KEY]: next });
-  console.warn(
-    `[LockIn] 429 backoff #${next.count}: pausing Gemini for ${delay / 1000}s`,
-  );
-  return next.until;
-}
-
-async function clearBackoff() {
-  await chrome.storage.local.set({ [BACKOFF_KEY]: { until: 0, count: 0 } });
-}
-
-async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
+async function classifyTilesLocally(profile, topic, tiles) {
   if (!tiles.length) return { blockedItemKeys: [], usedModel: false };
 
   const activeProfile = profilePrompt(profile, topic);
@@ -381,128 +263,106 @@ async function classifyTilesLocally(profile, modelSettings, topic, tiles) {
     ? activeProfile.tags
     : topicWords(topic);
 
-  // ── LLM path ────────────────────────────────────────────────────────────
-  if (modelSettings.enabled && modelSettings.apiKey && modelSettings.endpoint) {
-    const blockedItemKeys = new Set();
-    const now = Date.now();
+  const blockedItemKeys = new Set();
+  const now = Date.now();
 
-    // ── 1. Load cache; split tiles into cached vs fresh ──────────────────
-    const cache = await loadCache();
-    const fresh = [];
+  // ── 1. Cache lookup — skip tiles already classified ───────────────────────
+  const cache = await loadCache();
+  const fresh = [];
 
-    for (const tile of tiles) {
-      const key = tile.item_key;
-      if (!key) continue;
-      const entry = cache[key];
-      if (entry !== undefined) {
-        // Cached: check if the TTL has expired
-        if (entry.exp === 0 || now < entry.exp) {
-          // Still valid — use cached result
-          if (entry.v) blockedItemKeys.add(key);
-        } else {
-          // Expired — treat as fresh so Gemini re-evaluates it
-          fresh.push(tile);
-        }
-      } else {
-        fresh.push(tile);
-      }
+  for (const tile of tiles) {
+    const key = tile.item_key;
+    if (!key) continue;
+    const entry = cache[key];
+    if (entry !== undefined && (entry.exp === 0 || now < entry.exp)) {
+      if (entry.v) blockedItemKeys.add(key);
+    } else {
+      fresh.push(tile);
     }
+  }
 
-    // ── 2. Skip Gemini entirely if nothing new to classify ────────────────
-    if (fresh.length === 0) {
-      return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
-    }
-
-    // ── 3. Check persistent backoff ───────────────────────────────────────
-    const backoff = await loadBackoff();
-    if (backoff.until > now) {
-      const remainS = Math.ceil((backoff.until - now) / 1000);
-      console.log(
-        `[LockIn] Gemini in backoff — ${remainS}s remaining. ` +
-          `Allowing ${fresh.length} fresh tile(s) temporarily.`,
-      );
-      // Cache the fresh tiles as "allowed" until the backoff clears
-      const exp = backoff.until + 5_000; // re-try shortly after backoff lifts
-      for (const tile of fresh) {
-        cache[tile.item_key] = { v: false, exp };
-      }
-      await saveCache(cache);
-      return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
-    }
-
-    // ── 4. Call Gemini for fresh tiles only ───────────────────────────────
-    for (const batch of chunk(fresh, MODEL_CHUNK_SIZE)) {
-      const items = batch.map(tileSummary);
-      const prompt = [
-        "You are a relevance filter for YouTube recommendations.",
-        'Given a user profile and a list of video tiles, return JSON only: {"irrelevant_keys":[...]}.',
-        "Mark a tile as irrelevant ONLY when it is clearly and completely unrelated to the profile.",
-        "When the topic is ambiguous or the tile could plausibly interest someone with this profile, keep it relevant.",
-        "Do NOT block everything — only obvious mismatches like unrelated entertainment, sports, or cooking for a CS profile.",
-        `Profile name: ${activeProfile.name}`,
-        `Profile description: ${activeProfile.description || "(none)"}`,
-        `Profile tags: ${profileFallback.join(", ") || "(none)"}`,
-        `Items: ${JSON.stringify(items)}`,
-      ].join("\n");
-
-      try {
-        const content = await callChatCompletion(modelSettings, [
-          { role: "system", content: "Return valid JSON only." },
-          { role: "user", content: prompt },
-        ]);
-
-        // Success — reset backoff counter
-        await clearBackoff();
-
-        const parsed = extractJsonObject(content);
-        const irrelevant = new Set(
-          (Array.isArray(parsed && parsed.irrelevant_keys)
-            ? parsed.irrelevant_keys
-            : []
-          ).map((k) => String(k || "").trim()),
-        );
-
-        // Cache permanently (exp = 0) and collect blocked keys
-        for (const item of items) {
-          const isIrrelevant = irrelevant.has(item.item_key);
-          cache[item.item_key] = { v: isIrrelevant, exp: 0 };
-          if (isIrrelevant) blockedItemKeys.add(item.item_key);
-        }
-      } catch (err) {
-        const msg = String((err && err.message) || "");
-        if (msg.includes("429")) {
-          // Record exponential backoff so subsequent scrapes stay quiet
-          const backoffUntil = await recordBackoff();
-          // Cache the failed batch as "allowed" until just after backoff lifts
-          const exp = backoffUntil + 5_000;
-          for (const item of items) {
-            cache[item.item_key] = { v: false, exp };
-          }
-        } else {
-          // Non-429 error — allow the batch, don't cache (will retry next time)
-          console.warn("[LockIn] LLM error, allowing batch:", msg);
-        }
-      }
-    }
-
-    await saveCache(cache);
+  if (fresh.length === 0) {
     return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
   }
 
-  // ── Heuristic path ───────────────────────────────────────────────────────
-  // Only runs when LLM is explicitly OFF.
-  // If there are no profile tags and no topic we have no signal — allow all.
-  if (!profileFallback.length) {
-    return { blockedItemKeys: [], usedModel: false };
-  }
+  // ── 2. Fire all chunks in parallel against Ollama ─────────────────────────
+  const batches = chunk(fresh, MODEL_CHUNK_SIZE);
 
-  const blockedItemKeys = new Set();
-  for (const tile of tiles) {
-    if (heuristicIrrelevant(tile, activeProfile, topic)) {
-      blockedItemKeys.add(tile.item_key);
+  console.log(
+    `[LockIn] Firing ${batches.length} parallel Ollama chat(s) ` +
+      `(${MODEL_CHUNK_SIZE} tiles each, ${fresh.length} fresh tiles total).`,
+  );
+
+  const batchResults = await Promise.all(
+    batches.map(async (batch) => {
+      // KEEP/BLOCK label format — unambiguous for small models.
+      // "list the irrelevant ones" requires negation reasoning; labelling every
+      // item as KEEP or BLOCK is much clearer and more reliably followed.
+      const lines = batch.map(
+        (tile, i) =>
+          `${i + 1}. "${String(tile.title || "").slice(0, 80)}" – ${String(tile.channel || "").slice(0, 40)}`,
+      );
+
+      const prompt =
+        `User interests: ${profileFallback.join(", ") || "(none)"}\n\n` +
+        lines.join("\n");
+
+      try {
+        const content = await callChatCompletion([
+          {
+            role: "system",
+            content:
+              'You label YouTube videos as KEEP or BLOCK. Reply only with labels, one per line like "1:KEEP". No other text.',
+          },
+          { role: "user", content: prompt },
+        ]);
+
+        // Parse "1:KEEP\n2:BLOCK\n3:KEEP\n4:BLOCK" → Set of blocked item_keys.
+        // Regex is tolerant of spacing/casing so minor model formatting variance is fine.
+        const irrelevant = new Set();
+        for (const line of content.trim().split("\n")) {
+          const match = line.match(/^(\d+)\s*:\s*(KEEP|BLOCK)/i);
+          if (match && match[2].toUpperCase() === "BLOCK") {
+            const idx = parseInt(match[1], 10) - 1; // model outputs 1-based
+            if (idx >= 0 && idx < batch.length) {
+              irrelevant.add(batch[idx].item_key);
+            }
+          }
+        }
+
+        return { ok: true, batch, irrelevant };
+      } catch (err) {
+        return { ok: false, batch, err };
+      }
+    }),
+  );
+
+  // ── 3. Consolidate — successful batches cached, failed batches heuristic ──
+  for (const result of batchResults) {
+    if (result.ok) {
+      // Ollama succeeded — write verdict to cache permanently
+      for (const tile of result.batch) {
+        const isIrrelevant = result.irrelevant.has(tile.item_key);
+        cache[tile.item_key] = { v: isIrrelevant, exp: 0 };
+        if (isIrrelevant) blockedItemKeys.add(tile.item_key);
+      }
+    } else {
+      // Ollama unreachable / timed out — fall back to heuristic for this
+      // batch only.  Do NOT cache so Ollama retries next scrape cycle.
+      console.warn(
+        "[LockIn] Ollama error, falling back to heuristic for batch:",
+        String((result.err && result.err.message) || ""),
+      );
+      for (const tile of result.batch) {
+        if (heuristicIrrelevant(tile, activeProfile, topic)) {
+          blockedItemKeys.add(tile.item_key);
+        }
+      }
     }
   }
-  return { blockedItemKeys: [...blockedItemKeys], usedModel: false };
+
+  await saveCache(cache);
+  return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
 }
 
 async function postTilesToReceiver(
@@ -949,7 +809,6 @@ async function scrapeAndSend() {
     mode = DEFAULT_MODE,
     topic = "",
     activeProfile,
-    modelSettings,
   } = settings;
 
   const tab = await getYouTubeTab();
@@ -971,13 +830,8 @@ async function scrapeAndSend() {
   const counts = scrapeResult.counts || {};
   const profile = activeProfile || buildDefaultProfile();
 
-  // ── Classify locally (Gemini or heuristic) ────────────────────────────────
-  const classification = await classifyTilesLocally(
-    profile,
-    modelSettings,
-    topic,
-    tiles,
-  );
+  // ── Classify locally via Ollama (heuristic fallback per failed batch) ──────
+  const classification = await classifyTilesLocally(profile, topic, tiles);
   const blockedItemKeys = classification.blockedItemKeys || [];
   const blockedVideoIds = blockedItemKeys
     .filter((k) => String(k).startsWith("video:"))
@@ -1061,11 +915,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else if (msg && msg.cmd === "suggest-tags") {
       const settings = await loadSettings();
       const profile = ensureProfileShape(msg.profile || {});
-      const tags = await suggestTags(
-        profile,
-        settings.modelSettings,
-        settings.topic || "",
-      );
+      const tags = await suggestTags(profile, settings.topic || "");
       sendResponse({ ok: true, tags });
     } else if (msg && msg.cmd === "watch-start") {
       const minutes = Math.max(

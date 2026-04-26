@@ -1,11 +1,3 @@
-const DEFAULT_MODEL_SETTINGS = {
-  enabled: false,
-  endpoint:
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-  model: "gemini-2.5-flash",
-  apiKey: "",
-};
-
 const DEFAULT_PROFILE = {
   id: "default-profile",
   name: "Computer science student",
@@ -28,8 +20,6 @@ const $ = (id) => document.getElementById(id);
 const state = {
   profiles: [],
   activeProfileId: "",
-  modelSettings: { ...DEFAULT_MODEL_SETTINGS },
-  permissionStatus: "",
 };
 
 function uniqStrings(list) {
@@ -97,9 +87,6 @@ async function loadState() {
   const stored = await chrome.storage.local.get([
     "profiles",
     "activeProfileId",
-    "modelSettings",
-    "endpoint",
-    "mode",
     "topic",
   ]);
   state.profiles =
@@ -111,29 +98,9 @@ async function loadState() {
       state.profiles.find((p) => p.active)?.id ||
       state.profiles[0].id,
   );
-  state.modelSettings = {
-    ...DEFAULT_MODEL_SETTINGS,
-    ...(stored.modelSettings || {}),
-  };
-  if (stored.endpoint && !state.modelSettings.endpoint) {
-    state.modelSettings.endpoint = stored.endpoint;
-  }
   if (stored.topic && !state.profiles.some((p) => p.description)) {
     state.profiles[0].description = String(stored.topic).trim();
   }
-  state.modelSettings.enabled = !!state.modelSettings.enabled;
-  state.modelSettings.endpoint = String(
-    state.modelSettings.endpoint || DEFAULT_MODEL_SETTINGS.endpoint,
-  );
-  state.modelSettings.model = String(
-    state.modelSettings.model || DEFAULT_MODEL_SETTINGS.model,
-  );
-  state.modelSettings.apiKey = String(state.modelSettings.apiKey || "");
-}
-
-function renderPermissionStatus(text) {
-  state.permissionStatus = text;
-  $("permission-status").textContent = text;
 }
 
 function renderProfileSelect() {
@@ -220,10 +187,6 @@ function renderFields() {
   $("profile-name").value = profile.name;
   $("profile-description").value = profile.description;
   $("profile-tags").value = "";
-  $("model-enabled").value = state.modelSettings.enabled ? "1" : "0";
-  $("model-endpoint").value = state.modelSettings.endpoint;
-  $("model-name").value = state.modelSettings.model;
-  $("model-key").value = state.modelSettings.apiKey;
   $("profile-status").textContent =
     `${state.profiles.length} profile(s) configured. Active: ${profile.name}.`;
 }
@@ -233,7 +196,10 @@ function render() {
   renderProfiles();
   renderFields();
   renderTagRow();
-  if (state.permissionStatus) renderPermissionStatus(state.permissionStatus);
+}
+
+function setProfileStatus(msg) {
+  $("profile-status").textContent = msg;
 }
 
 async function persistProfiles() {
@@ -247,48 +213,6 @@ async function persistProfiles() {
     activeProfileId: state.activeProfileId,
   });
   render();
-}
-
-async function persistModelSettings() {
-  state.modelSettings.enabled = $("model-enabled").value === "1";
-  state.modelSettings.endpoint = String(
-    $("model-endpoint").value || DEFAULT_MODEL_SETTINGS.endpoint,
-  ).trim();
-  state.modelSettings.model = String(
-    $("model-name").value || DEFAULT_MODEL_SETTINGS.model,
-  ).trim();
-  state.modelSettings.apiKey = String($("model-key").value || "");
-  await chrome.storage.local.set({ modelSettings: state.modelSettings });
-  renderPermissionStatus(
-    `Saved model settings for ${state.modelSettings.endpoint}.`,
-  );
-}
-
-function setProfileStatus(msg) {
-  $("profile-status").textContent = msg;
-}
-
-async function requestEndpointPermission() {
-  const endpoint = String(
-    $("model-endpoint").value || DEFAULT_MODEL_SETTINGS.endpoint,
-  ).trim();
-  try {
-    const origin = new URL(endpoint).origin;
-    const pattern = `${origin}/*`;
-    const granted = await chrome.permissions.contains({ origins: [pattern] });
-    if (granted) {
-      renderPermissionStatus(`Permission already granted for ${pattern}.`);
-      return;
-    }
-    const ok = await chrome.permissions.request({ origins: [pattern] });
-    renderPermissionStatus(
-      ok
-        ? `Permission granted for ${pattern}.`
-        : `Permission not granted for ${pattern}.`,
-    );
-  } catch (err) {
-    renderPermissionStatus(`Invalid endpoint URL: ${err.message}`);
-  }
 }
 
 async function createProfile() {
@@ -352,14 +276,17 @@ async function addTag() {
 
 async function suggestTagsFromModel() {
   const profile = getActiveProfile();
-  setProfileStatus("Suggesting tags from the model...");
+  setProfileStatus("Asking Ollama to suggest tags…");
   const response = await chrome.runtime.sendMessage({
     cmd: "suggest-tags",
     profile,
     topic: profile.description || profile.name,
   });
   if (!response || !response.ok) {
-    setProfileStatus((response && response.reason) || "Tag suggestion failed.");
+    setProfileStatus(
+      (response && response.reason) ||
+        "Tag suggestion failed — is Ollama running?",
+    );
     return;
   }
   profile.tags = uniqStrings([
@@ -368,12 +295,6 @@ async function suggestTagsFromModel() {
   ]);
   await persistProfiles();
   setProfileStatus(`Added ${(response.tags || []).length} suggested tag(s).`);
-}
-
-async function saveAll() {
-  await persistModelSettings();
-  await persistProfiles();
-  setProfileStatus(`Saved settings for ${getActiveProfile().name}.`);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -387,19 +308,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     await chrome.storage.local.set({ activeProfileId: state.activeProfileId });
     render();
   });
-  $("model-enabled").addEventListener("change", persistModelSettings);
-  $("model-endpoint").addEventListener("change", persistModelSettings);
-  $("model-name").addEventListener("change", persistModelSettings);
-  $("model-key").addEventListener("change", persistModelSettings);
 
   $("create-profile").addEventListener("click", createProfile);
   $("delete-profile").addEventListener("click", deleteProfile);
   $("set-active").addEventListener("click", setActiveProfile);
   $("add-tag").addEventListener("click", addTag);
   $("suggest-tags").addEventListener("click", suggestTagsFromModel);
-  $("save-model").addEventListener("click", persistModelSettings);
-  $("allow-endpoint").addEventListener("click", requestEndpointPermission);
-  $("save-all").addEventListener("click", saveAll);
+  $("save-all").addEventListener("click", async () => {
+    await persistProfiles();
+    setProfileStatus(`Saved — active profile: ${getActiveProfile().name}.`);
+  });
 
   $("tag-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -409,8 +327,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("open-popup").addEventListener("click", () => {
-    // chrome.action.openPopup() requires Chrome 127+ and specific contexts.
-    // Simply close this settings tab — the user can click the toolbar icon.
     chrome.tabs.getCurrent((tab) => {
       if (tab && tab.id) {
         chrome.tabs.remove(tab.id);

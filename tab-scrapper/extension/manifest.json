@@ -3,21 +3,14 @@
   "name": "LockIn",
   "version": "0.1.0",
   "description": "Scrape YouTube tiles, classify them against a local profile, and block irrelevant content in-page.",
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "storage",
-    "alarms",
-    "tabs",
-    "permissions"
-  ],
+  "permissions": ["activeTab", "scripting", "storage", "alarms", "tabs"],
   "host_permissions": [
     "*://*.youtube.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*",
-    "https://generativelanguage.googleapis.com/*"
+    "http://127.0.0.1:11434/*",
+    "http://localhost:11434/*"
   ],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },
