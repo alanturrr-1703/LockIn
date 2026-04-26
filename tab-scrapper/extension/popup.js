@@ -42,7 +42,6 @@ async function toggleWatch() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   const stored = await chrome.storage.local.get([
-    "endpoint",
     "mode",
     "topic",
     "watchOn",
@@ -51,7 +50,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     "profiles",
   ]);
 
-  if (stored.endpoint) $("endpoint").value = stored.endpoint;
   if (stored.mode) $("mode").value = stored.mode;
   if (stored.topic) $("topic").value = stored.topic;
   setWatchButton(!!stored.watchOn);
@@ -95,9 +93,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // ── Event listeners ───────────────────────────────────────────────────────
-  $("endpoint").addEventListener("change", () =>
-    chrome.storage.local.set({ endpoint: $("endpoint").value }),
-  );
   $("mode").addEventListener("change", () =>
     chrome.storage.local.set({ mode: $("mode").value }),
   );

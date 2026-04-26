@@ -1,7 +1,7 @@
 const DEFAULT_PROFILE = {
   id: "default-profile",
   name: "Computer science student",
-  description:
+  prompt:
     "Focus on algorithms, data structures, system design, ML, and practical coding content.",
   tags: [
     "dsa",
@@ -59,9 +59,7 @@ function ensureProfile(profile) {
       String(
         profile && profile.name ? profile.name : DEFAULT_PROFILE.name,
       ).trim() || DEFAULT_PROFILE.name,
-    description: String(
-      profile && profile.description ? profile.description : "",
-    ).trim(),
+    prompt: String(profile && profile.prompt ? profile.prompt : "").trim(),
     tags: uniqStrings(
       Array.isArray(profile && profile.tags)
         ? profile.tags.map(normalizeTag)
@@ -98,8 +96,8 @@ async function loadState() {
       state.profiles.find((p) => p.active)?.id ||
       state.profiles[0].id,
   );
-  if (stored.topic && !state.profiles.some((p) => p.description)) {
-    state.profiles[0].description = String(stored.topic).trim();
+  if (stored.topic && !state.profiles.some((p) => p.prompt)) {
+    state.profiles[0].prompt = String(stored.topic).trim();
   }
 }
 
@@ -128,7 +126,7 @@ function renderProfiles() {
     title.textContent = p.name;
     const desc = document.createElement("div");
     desc.className = "muted";
-    desc.textContent = p.description || "No description yet.";
+    desc.textContent = p.prompt || "No prompt yet.";
     left.appendChild(title);
     left.appendChild(desc);
     const right = document.createElement("div");
@@ -185,7 +183,7 @@ function renderTagRow() {
 function renderFields() {
   const profile = getActiveProfile();
   $("profile-name").value = profile.name;
-  $("profile-description").value = profile.description;
+  $("profile-prompt").value = profile.prompt;
   $("profile-tags").value = "";
   $("profile-status").textContent =
     `${state.profiles.length} profile(s) configured. Active: ${profile.name}.`;
@@ -206,8 +204,8 @@ async function persistProfiles() {
   const profile = getActiveProfile();
   const nameVal = String($("profile-name").value || "").trim();
   if (nameVal) profile.name = nameVal;
-  const descVal = String($("profile-description").value || "").trim();
-  if (descVal !== undefined) profile.description = descVal;
+  const descVal = String($("profile-prompt").value || "").trim();
+  if (descVal !== undefined) profile.prompt = descVal;
   await chrome.storage.local.set({
     profiles: state.profiles,
     activeProfileId: state.activeProfileId,
@@ -217,12 +215,12 @@ async function persistProfiles() {
 
 async function createProfile() {
   const name = String($("profile-name").value || "").trim();
-  const description = String($("profile-description").value || "").trim();
+  const prompt = String($("profile-prompt").value || "").trim();
   const tags = splitTags($("profile-tags").value);
   const profile = ensureProfile({
     id: makeId("profile"),
     name: name || DEFAULT_PROFILE.name,
-    description,
+    prompt,
     tags,
     active: false,
   });
@@ -280,7 +278,7 @@ async function suggestTagsFromModel() {
   const response = await chrome.runtime.sendMessage({
     cmd: "suggest-tags",
     profile,
-    topic: profile.description || profile.name,
+    topic: profile.prompt || profile.name,
   });
   if (!response || !response.ok) {
     setProfileStatus(
@@ -302,7 +300,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   render();
 
   $("profile-name").addEventListener("change", persistProfiles);
-  $("profile-description").addEventListener("change", persistProfiles);
+  $("profile-prompt").addEventListener("change", persistProfiles);
   $("profile-id").addEventListener("change", async (e) => {
     state.activeProfileId = String(e.target.value || state.activeProfileId);
     await chrome.storage.local.set({ activeProfileId: state.activeProfileId });

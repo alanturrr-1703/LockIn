@@ -2,16 +2,18 @@
 // since popups close as soon as the user clicks away.
 
 const ALARM_NAME = "yt-scrape-watch";
-const DEFAULT_ENDPOINT = "http://127.0.0.1:8765/tiles";
+const PROFILE_SYNC_ALARM = "lockin-profile-sync";
+
 const DEFAULT_MODE = "lookahead";
 const DEFAULT_INTERVAL_MIN = 0.5;
 const OLLAMA_ENDPOINT = "http://localhost:11434/api/chat";
-const OLLAMA_MODEL = "llama3.2:3b";
+const OLLAMA_MODEL_CLASSIFY = "llama3.2:3b"; // KEEP/BLOCK decisions
+const OLLAMA_MODEL_TAGS = "gemma4:e2b"; // tag suggestion (bigger model = better tags)
 
 const DEFAULT_PROFILE = {
   id: "default-profile",
   name: "Computer science student",
-  description:
+  prompt:
     "Focus on algorithms, data structures, system design, ML, and practical coding content.",
   tags: [
     "dsa",
@@ -70,7 +72,7 @@ function ensureProfileShape(p) {
     name:
       String(p && p.name ? p.name : DEFAULT_PROFILE.name).trim() ||
       DEFAULT_PROFILE.name,
-    description: String(p && p.description ? p.description : "").trim(),
+    prompt: String(p && p.prompt ? p.prompt : "").trim(),
     tags: uniqStrings(tags),
     active: !!(p && p.active),
   };
@@ -82,7 +84,6 @@ function buildDefaultProfile() {
 
 async function loadSettings() {
   const stored = await chrome.storage.local.get([
-    "endpoint",
     "mode",
     "topic",
     "watchOn",
@@ -103,7 +104,6 @@ async function loadSettings() {
   const activeProfile =
     profiles.find((p) => p.id === activeProfileId) || profiles[0];
   return {
-    endpoint: stored.endpoint || DEFAULT_ENDPOINT,
     mode: stored.mode || DEFAULT_MODE,
     topic: String(stored.topic || "").trim(),
     watchOn: !!stored.watchOn,
@@ -120,11 +120,11 @@ function profilePrompt(profile, fallbackTopic) {
   const tags = uniqStrings(p.tags || []);
   const topic = String(fallbackTopic || "").trim();
   const notes = [];
-  if (p.description) notes.push(p.description);
+  if (p.prompt) notes.push(p.prompt);
   if (topic) notes.push(`Fallback topic: ${topic}`);
   return {
     name: p.name,
-    description: notes.join(" "),
+    prompt: notes.join(" "),
     tags,
   };
 }
@@ -176,12 +176,12 @@ function heuristicIrrelevant(tile, profile, fallbackTopic) {
   return !tags.some((tag) => tag && text.includes(tag));
 }
 
-async function callChatCompletion(messages) {
+async function callChatCompletion(messages, model = OLLAMA_MODEL_CLASSIFY) {
   const resp = await fetch(OLLAMA_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: OLLAMA_MODEL,
+      model,
       messages,
       stream: false,
     }),
@@ -202,28 +202,31 @@ async function suggestTags(profile, fallbackTopic) {
   const fallback = uniqStrings([
     ...seedTags,
     ...topicWords(summary.name),
-    ...topicWords(summary.description),
-  ]).slice(0, 12);
+    ...topicWords(summary.prompt),
+  ]).slice(0, 50);
   try {
-    const content = await callChatCompletion([
-      { role: "system", content: "Return valid JSON only." },
-      {
-        role: "user",
-        content: [
-          "Suggest 8 to 12 concise lowercase interest tags for this profile.",
-          'Return JSON exactly like {"tags":["tag1","tag2"]}.',
-          `Profile name: ${summary.name}`,
-          `Profile description: ${summary.description || "(none)"}`,
-          `Existing tags: ${seedTags.join(", ") || "(none)"}`,
-        ].join("\n"),
-      },
-    ]);
+    const content = await callChatCompletion(
+      [
+        { role: "system", content: "Return valid JSON only." },
+        {
+          role: "user",
+          content: [
+            "Suggest 40 to 50 concise lowercase interest tags for this profile.",
+            'Return JSON exactly like {"tags":["tag1","tag2"]}.',
+            `Profile name: ${summary.name}`,
+            `Profile description: ${summary.prompt || "(none)"}`,
+            `Existing tags: ${seedTags.join(", ") || "(none)"}`,
+          ].join("\n"),
+        },
+      ],
+      OLLAMA_MODEL_TAGS,
+    );
     const parsed = extractJsonObject(content);
     const tags = Array.isArray(parsed && parsed.tags) ? parsed.tags : [];
     return uniqStrings(tags.map(normalizeTag))
-      .slice(0, 12)
+      .slice(0, 50)
       .concat(fallback)
-      .slice(0, 12);
+      .slice(0, 50);
   } catch (err) {
     console.warn(
       "[LockIn] Ollama tag suggestion failed:",
@@ -264,6 +267,7 @@ async function classifyTilesLocally(profile, topic, tiles) {
     : topicWords(topic);
 
   const blockedItemKeys = new Set();
+  const verdicts = {}; // { [item_key]: { blocked: bool, method: "llm"|"heuristic"|"cached" } }
   const now = Date.now();
 
   // ── 1. Cache lookup — skip tiles already classified ───────────────────────
@@ -276,6 +280,7 @@ async function classifyTilesLocally(profile, topic, tiles) {
     const entry = cache[key];
     if (entry !== undefined && (entry.exp === 0 || now < entry.exp)) {
       if (entry.v) blockedItemKeys.add(key);
+      verdicts[key] = { blocked: !!entry.v, method: "cached" };
     } else {
       fresh.push(tile);
     }
@@ -303,18 +308,22 @@ async function classifyTilesLocally(profile, topic, tiles) {
           `${i + 1}. "${String(tile.title || "").slice(0, 80)}" – ${String(tile.channel || "").slice(0, 40)}`,
       );
 
-      const prompt =
-        `User interests: ${profileFallback.join(", ") || "(none)"}\n\n` +
-        lines.join("\n");
+      const description = activeProfile.prompt || "(no description set)";
 
       try {
         const content = await callChatCompletion([
           {
             role: "system",
             content:
-              'You label YouTube videos as KEEP or BLOCK. Reply only with labels, one per line like "1:KEEP". No other text.',
+              `You are a personalized YouTube feed filter.\n` +
+              `The user only wants to watch content that matches this description: "${description}"\n` +
+              `For each video, reply KEEP only if it strictly fits their focus, or BLOCK if it is clearly off-topic or unrelated.\n` +
+              `Format: one label per line exactly like "1:KEEP". No explanation, no extra text.`,
           },
-          { role: "user", content: prompt },
+          {
+            role: "user",
+            content: lines.join("\n"),
+          },
         ]);
 
         // Parse "1:KEEP\n2:BLOCK\n3:KEEP\n4:BLOCK" → Set of blocked item_keys.
@@ -345,6 +354,7 @@ async function classifyTilesLocally(profile, topic, tiles) {
         const isIrrelevant = result.irrelevant.has(tile.item_key);
         cache[tile.item_key] = { v: isIrrelevant, exp: 0 };
         if (isIrrelevant) blockedItemKeys.add(tile.item_key);
+        verdicts[tile.item_key] = { blocked: isIrrelevant, method: "llm" };
       }
     } else {
       // Ollama unreachable / timed out — fall back to heuristic for this
@@ -354,51 +364,35 @@ async function classifyTilesLocally(profile, topic, tiles) {
         String((result.err && result.err.message) || ""),
       );
       for (const tile of result.batch) {
-        if (heuristicIrrelevant(tile, activeProfile, topic)) {
-          blockedItemKeys.add(tile.item_key);
-        }
+        const isIrrelevant = heuristicIrrelevant(tile, activeProfile, topic);
+        if (isIrrelevant) blockedItemKeys.add(tile.item_key);
+        verdicts[tile.item_key] = {
+          blocked: isIrrelevant,
+          method: "heuristic",
+        };
       }
     }
   }
 
   await saveCache(cache);
-  return { blockedItemKeys: [...blockedItemKeys], usedModel: true };
-}
-
-async function postTilesToReceiver(
-  endpoint,
-  tiles,
-  pageUrl,
-  topic,
-  profile,
-  blockedItemKeys,
-  blockedVideoIds,
-) {
-  try {
-    const resp = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tiles,
-        page_url: pageUrl,
-        topic,
-        profile,
-        blocked_item_keys: blockedItemKeys,
-        blocked_video_ids: blockedVideoIds,
-      }),
-    });
-    if (!resp.ok)
-      return { ok: false, reason: `Receiver returned ${resp.status}` };
-    const data = await resp.json().catch(() => ({}));
-    return { ok: true, data };
-  } catch (err) {
-    return { ok: false, reason: err.message };
-  }
+  return { blockedItemKeys: [...blockedItemKeys], usedModel: true, verdicts };
 }
 
 function applyOverlayFn({ blockedVideoIds, blockedItemKeys }) {
-  const blockedVideos = new Set((blockedVideoIds || []).filter(Boolean));
-  const blockedKeys = new Set((blockedItemKeys || []).filter(Boolean));
+  const newVideos = (blockedVideoIds || []).filter(Boolean);
+  const newKeys = (blockedItemKeys || []).filter(Boolean);
+
+  // ── Persist blocked sets across scrape cycles ─────────────────────────────
+  // window.__lockInBlocked survives between alarm firings so the
+  // MutationObserver always has the full accumulated block list.
+  if (!window.__lockInBlocked) {
+    window.__lockInBlocked = { videos: new Set(), keys: new Set() };
+  }
+  for (const v of newVideos) window.__lockInBlocked.videos.add(v);
+  for (const k of newKeys) window.__lockInBlocked.keys.add(k);
+
+  const blockedVideos = window.__lockInBlocked.videos;
+  const blockedKeys = window.__lockInBlocked.keys;
 
   const normalizeUrl = (url) => {
     if (!url) return "";
@@ -430,15 +424,6 @@ function applyOverlayFn({ blockedVideoIds, blockedItemKeys }) {
     const norm = normalizeUrl(url);
     return norm ? `url:${norm}` : "";
   };
-
-  for (const old of document.querySelectorAll(".lockin-overlay")) old.remove();
-  for (const el of document.querySelectorAll("[data-lockin-blocked='1']")) {
-    el.removeAttribute("data-lockin-blocked");
-    if (el.dataset.lockinPrevPosition) {
-      el.style.position = el.dataset.lockinPrevPosition;
-      delete el.dataset.lockinPrevPosition;
-    }
-  }
 
   if (blockedVideos.size === 0 && blockedKeys.size === 0)
     return { blockedCount: 0 };
@@ -482,6 +467,8 @@ function applyOverlayFn({ blockedVideoIds, blockedItemKeys }) {
 
   const maybeBlockHost = (host) => {
     if (!host) return false;
+    // Already overlaid — skip entirely so re-runs never cause a flash
+    if (host.dataset.lockinBlocked === "1") return false;
     const links = host.querySelectorAll("a[href]");
     let shouldBlock = false;
     for (const a of links) {
@@ -511,12 +498,32 @@ function applyOverlayFn({ blockedVideoIds, blockedItemKeys }) {
   };
 
   let blockedCount = 0;
+  const selectorStr = hostSelectors.join(",");
   const seenHosts = new Set();
-  for (const host of document.querySelectorAll(hostSelectors.join(","))) {
+  for (const host of document.querySelectorAll(selectorStr)) {
     if (seenHosts.has(host)) continue;
     seenHosts.add(host);
     if (maybeBlockHost(host)) blockedCount += 1;
   }
+
+  // ── MutationObserver — instant re-block on YouTube re-renders ────────────
+  // YouTube's SPA constantly adds and replaces tile elements (infinite scroll,
+  // recommendations refresh, SPA navigation).  The observer fires immediately
+  // on any DOM mutation and re-runs maybeBlockHost on every host element it
+  // can find — idempotent because already-blocked hosts are skipped above.
+  // Guard with window.__lockInObserver so only one observer ever exists.
+  if (!window.__lockInObserver) {
+    window.__lockInObserver = new MutationObserver(() => {
+      for (const host of document.querySelectorAll(selectorStr)) {
+        maybeBlockHost(host);
+      }
+    });
+    window.__lockInObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
   return { blockedCount };
 }
 
@@ -802,14 +809,57 @@ async function getYouTubeTab() {
   return yt[0];
 }
 
+// ── Profile sync — runs independently of Watch mode ───────────────────────────
+// Pushes the extension's current profiles to the desktop app and applies any
+// pending changes the user made on the desktop (new profile / activate).
+// Called both from the dedicated PROFILE_SYNC_ALARM and from scrapeAndSend().
+async function syncProfilesWithDesktop() {
+  try {
+    const stored = await chrome.storage.local.get([
+      "profiles",
+      "activeProfileId",
+    ]);
+    const resp = await fetch("http://localhost:7432/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profiles: stored.profiles || [],
+        activeProfileId: stored.activeProfileId || "",
+      }),
+      signal: AbortSignal.timeout(2000),
+    });
+    const data = await resp.json();
+    if (data.dirty && Array.isArray(data.profiles)) {
+      await chrome.storage.local.set({
+        profiles: data.profiles,
+        activeProfileId: data.activeProfileId || "",
+      });
+      console.log("[LockIn] Profiles synced from desktop app.");
+    }
+  } catch (_) {
+    // Desktop app not running — silently skip.
+  }
+}
+
 async function scrapeAndSend() {
+  // ── Check if desktop app has paused LockIn ────────────────────────────────
+  // Fails open — if the desktop app is not running, proceed normally.
+  try {
+    const statusResp = await fetch("http://localhost:7432/status", {
+      signal: AbortSignal.timeout(1000),
+    });
+    const status = await statusResp.json();
+    if (!status.enabled) {
+      return { ok: false, reason: "LockIn paused from desktop app." };
+    }
+    // Sync profiles as part of each scrape cycle too
+    await syncProfilesWithDesktop();
+  } catch (_) {
+    // Desktop app not running — continue as normal.
+  }
+
   const settings = await loadSettings();
-  const {
-    endpoint = DEFAULT_ENDPOINT,
-    mode = DEFAULT_MODE,
-    topic = "",
-    activeProfile,
-  } = settings;
+  const { mode = DEFAULT_MODE, topic = "", activeProfile } = settings;
 
   const tab = await getYouTubeTab();
   if (!tab) return { ok: false, reason: "No YouTube tab open." };
@@ -833,6 +883,8 @@ async function scrapeAndSend() {
   // ── Classify locally via Ollama (heuristic fallback per failed batch) ──────
   const classification = await classifyTilesLocally(profile, topic, tiles);
   const blockedItemKeys = classification.blockedItemKeys || [];
+  const verdicts = classification.verdicts || {};
+
   const blockedVideoIds = blockedItemKeys
     .filter((k) => String(k).startsWith("video:"))
     .map((k) => String(k).slice(6))
@@ -851,17 +903,6 @@ async function scrapeAndSend() {
     blockedOnPage = 0;
   }
 
-  // ── POST to Java receiver (optional archival) ─────────────────────────────
-  const receiverResult = await postTilesToReceiver(
-    endpoint,
-    tiles,
-    tab.url,
-    topic,
-    profile,
-    blockedItemKeys,
-    blockedVideoIds,
-  );
-
   if (tiles.length === 0) {
     const breakdown = Object.entries(counts.by_selector || {})
       .filter(([, n]) => n > 0)
@@ -878,34 +919,65 @@ async function scrapeAndSend() {
       blocked: blockedOnPage,
       profile: profile.name,
       modelUsed: classification.usedModel,
-      receiver: receiverResult,
       reason: `0 tiles. selectors=[${breakdown || "none matched"}]${fb}. mode=${counts.mode} vp=${counts.viewport_h}. URL=${counts.page_url}`,
     };
   }
 
-  const accepted =
-    receiverResult.ok &&
-    receiverResult.data &&
-    typeof receiverResult.data.accepted === "number"
-      ? receiverResult.data.accepted
-      : tiles.length;
+  // ── Report stats to desktop app ───────────────────────────────────────────
+  try {
+    await fetch("http://localhost:7432/stats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        blocked: blockedOnPage,
+        sent: tiles.length,
+        profile: profile.name,
+        scrape_at: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch (_) {
+    // Desktop app not running — silently skip.
+  }
 
   return {
     ok: true,
     sent: tiles.length,
-    accepted,
     blocked: blockedOnPage,
     counts,
     profile: profile.name,
     modelUsed: classification.usedModel,
-    receiver: receiverResult,
   };
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== ALARM_NAME) return;
-  const result = await scrapeAndSend();
-  await chrome.storage.local.set({ lastResult: result, lastAt: Date.now() });
+  if (alarm.name === ALARM_NAME) {
+    const result = await scrapeAndSend();
+    await chrome.storage.local.set({ lastResult: result, lastAt: Date.now() });
+  } else if (alarm.name === PROFILE_SYNC_ALARM) {
+    await syncProfilesWithDesktop();
+  }
+});
+
+// ── Start the profile sync alarm on install and browser startup ───────────────
+// This runs every 30 s regardless of whether Watch mode is on, so profiles
+// created on the desktop app always land in the extension quickly.
+function ensureProfileSyncAlarm() {
+  chrome.alarms.get(PROFILE_SYNC_ALARM, (existing) => {
+    if (!existing) {
+      chrome.alarms.create(PROFILE_SYNC_ALARM, { periodInMinutes: 0.5 });
+    }
+  });
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureProfileSyncAlarm();
+  syncProfilesWithDesktop();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureProfileSyncAlarm();
+  syncProfilesWithDesktop();
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
