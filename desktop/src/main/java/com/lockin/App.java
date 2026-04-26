@@ -407,9 +407,37 @@ public class App extends Application {
             tagRow.getChildren().add(chip);
         }
 
-        // ── Activate button ───────────────────────────────────────────────────
-        HBox bottomRow = new HBox();
+        // ── Bottom row: Suggest Tags + Set Active ─────────────────────────────
+        HBox bottomRow = new HBox(8);
         bottomRow.setAlignment(Pos.CENTER_RIGHT);
+
+        // Suggest Tags button — always shown
+        Button suggestBtn = new Button("✦ Suggest Tags");
+        suggestBtn.setStyle(
+            "-fx-background-color: transparent;" +
+                "-fx-text-fill: " +
+                MUTED +
+                ";" +
+                "-fx-font-size: 12px;" +
+                "-fx-border-color: rgba(255,255,255,0.15);" +
+                "-fx-border-width: 1; -fx-border-radius: 8;" +
+                "-fx-background-radius: 8; -fx-cursor: hand;" +
+                "-fx-padding: 4 12 4 12;"
+        );
+        suggestBtn.setOnAction(e -> {
+            suggestBtn.setDisable(true);
+            suggestBtn.setText("Suggesting…");
+            TagSuggester.suggestAsync(name, prompt, tags).thenAccept(newTags ->
+                Platform.runLater(() -> {
+                    suggestBtn.setDisable(false);
+                    suggestBtn.setText("✦ Suggest Tags");
+                    if (newTags.isEmpty()) return;
+                    controlServer.updateProfileTags(id, newTags);
+                    renderProfileCards();
+                })
+            );
+        });
+        bottomRow.getChildren().add(suggestBtn);
 
         if (!active) {
             Button activateBtn = new Button("Set Active");
@@ -426,7 +454,6 @@ public class App extends Application {
             );
             activateBtn.setOnAction(e -> {
                 controlServer.setPendingActiveProfile(id);
-                // Optimistic re-render
                 renderProfileCards();
             });
             bottomRow.getChildren().add(activateBtn);
@@ -484,13 +511,55 @@ public class App extends Application {
         promptArea.setPrefRowCount(3);
         TextField tagsField = styledTextField("dsa, ml, python, system design");
 
+        // Suggest Tags button inside the dialog
+        Button dialogSuggestBtn = new Button("✦ Suggest Tags");
+        dialogSuggestBtn.setStyle(
+            "-fx-background-color: transparent;" +
+                "-fx-text-fill: " +
+                MUTED +
+                ";" +
+                "-fx-font-size: 12px;" +
+                "-fx-border-color: rgba(255,255,255,0.15);" +
+                "-fx-border-width: 1; -fx-border-radius: 8;" +
+                "-fx-background-radius: 8; -fx-cursor: hand;" +
+                "-fx-padding: 7 12 7 12;"
+        );
+        dialogSuggestBtn.setOnAction(e -> {
+            String n = nameField.getText().trim();
+            String p = promptArea.getText().trim();
+            if (n.isEmpty() && p.isEmpty()) return;
+            dialogSuggestBtn.setDisable(true);
+            dialogSuggestBtn.setText("Suggesting…");
+            List<String> current = new ArrayList<>();
+            for (String t : tagsField.getText().split("[,\\n]")) {
+                String trimmed = t.trim().toLowerCase();
+                if (!trimmed.isEmpty()) current.add(trimmed);
+            }
+            TagSuggester.suggestAsync(n, p, current).thenAccept(newTags ->
+                Platform.runLater(() -> {
+                    dialogSuggestBtn.setDisable(false);
+                    dialogSuggestBtn.setText("✦ Suggest Tags");
+                    if (newTags.isEmpty()) return;
+                    // Merge current + new, deduplicate
+                    java.util.LinkedHashSet<String> merged =
+                        new java.util.LinkedHashSet<>(current);
+                    merged.addAll(newTags);
+                    tagsField.setText(String.join(", ", merged));
+                })
+            );
+        });
+
+        HBox tagsRow = new HBox(8, tagsField, dialogSuggestBtn);
+        tagsRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(tagsField, Priority.ALWAYS);
+
         VBox form = new VBox(
             12,
             fieldGroup("Profile name", nameField),
             fieldGroup("Prompt (drives LLM filtering)", promptArea),
             fieldGroup(
                 "Tags — comma separated (drives heuristic fallback)",
-                tagsField
+                tagsRow
             )
         );
         form.setPadding(new Insets(4, 0, 4, 0));

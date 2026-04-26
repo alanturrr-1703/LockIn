@@ -169,6 +169,44 @@ public class ControlServer {
         profilesDirty = true;
     }
 
+    /**
+     * Merges {@code newTags} into the profile identified by {@code profileId},
+     * deduplicates, caps at 50, and marks the server dirty so the extension
+     * picks up the updated tag list on its next /profiles poll.
+     */
+    public void updateProfileTags(String profileId, List<String> newTags) {
+        List<Map<String, Object>> updated = new ArrayList<>();
+        for (Map<String, Object> p : profiles) {
+            if (profileId.equals(String.valueOf(p.getOrDefault("id", "")))) {
+                // Build a mutable copy so we don't mutate the shared map
+                Map<String, Object> copy = new java.util.HashMap<>(p);
+
+                // Merge existing + new, deduplicate, cap at 50
+                java.util.LinkedHashSet<String> merged =
+                    new java.util.LinkedHashSet<>();
+                Object existing = copy.get("tags");
+                if (existing instanceof List<?> existingList) {
+                    for (Object t : existingList) merged.add(String.valueOf(t));
+                }
+                for (String t : newTags) {
+                    String norm = t.trim().toLowerCase();
+                    if (!norm.isEmpty()) merged.add(norm);
+                }
+                List<String> finalTags = new ArrayList<>(merged);
+                if (finalTags.size() > 50) finalTags = finalTags.subList(0, 50);
+
+                copy.put("tags", finalTags);
+                updated.add(copy);
+            } else {
+                updated.add(p);
+            }
+        }
+        profiles = updated; // immediate UI update
+        pendingProfiles = new ArrayList<>(updated);
+        pendingActiveProfileId = activeProfileId;
+        profilesDirty = true;
+    }
+
     // ── Handlers ──────────────────────────────────────────────────────────────
 
     /**
