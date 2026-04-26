@@ -10,6 +10,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
 import javafx.stage.Stage;
@@ -44,6 +45,14 @@ public class App extends Application {
     private Label lastScrapeValue;
     private VBox profileListBox;
 
+    // ── Desktop Guard UI refs ─────────────────────────────────────────────────
+    private DesktopGuard desktopGuard;
+    private Label desktopStatusLabel;
+    private FlowPane blockedFilesFlow;
+    private FlowPane keptFilesFlow;
+    private Button scanBtn;
+    private final String[] lastActiveProfileId = { "" };
+
     // ─────────────────────────────────────────────────────────────────────────
     // JavaFX lifecycle
     // ─────────────────────────────────────────────────────────────────────────
@@ -52,10 +61,21 @@ public class App extends Application {
     public void start(Stage stage) throws Exception {
         controlServer.start();
 
-        // Rebuild profile cards whenever the extension syncs new profiles
-        controlServer.setOnProfilesUpdated(() ->
-            Platform.runLater(this::renderProfileCards)
+        // Init DesktopGuard before building UI so button actions can reference it
+        desktopGuard = new DesktopGuard(controlServer);
+        desktopGuard.setOnScanComplete(() ->
+            Platform.runLater(this::renderDesktopFiles)
         );
+
+        // Rebuild profile cards + re-scan desktop when extension syncs new profiles
+        controlServer.setOnProfilesUpdated(() -> {
+            Platform.runLater(this::renderProfileCards);
+            String currentId = controlServer.getActiveProfileId();
+            if (!currentId.equals(lastActiveProfileId[0])) {
+                lastActiveProfileId[0] = currentId;
+                if (enabled) desktopGuard.scanAndApply();
+            }
+        });
 
         ScrollPane scroll = new ScrollPane(buildRoot());
         scroll.setFitToWidth(true);
@@ -110,6 +130,7 @@ public class App extends Application {
                 buildStatusPanel(),
                 buildStatsPanel(),
                 buildProfilesPanel(),
+                buildDesktopPanel(),
                 buildFooter()
             );
         return root;
@@ -146,6 +167,11 @@ public class App extends Application {
             controlServer.setEnabled(enabled);
             applyToggleStyle(enabled);
             toggleBtn.setText(enabled ? "● ACTIVE" : "○ PAUSED");
+            if (!enabled) {
+                desktopGuard.restoreAll();
+            } else {
+                desktopGuard.scanAndApply();
+            }
         });
 
         return toggleBtn;
@@ -542,6 +568,116 @@ public class App extends Application {
                 lastScrapeValue.setText(at.isBlank() ? "—" : formatTime(at));
             })
         );
+    }
+
+    // ── Desktop Guard panel ───────────────────────────────────────────────────
+
+    private VBox buildDesktopPanel() {
+        Label heading = sectionHeading("DESKTOP GUARD");
+
+        scanBtn = new Button("⟳  Scan Now");
+        scanBtn.setStyle(
+            "-fx-background-color: transparent;" +
+                "-fx-text-fill: " +
+                ACCENT +
+                ";" +
+                "-fx-font-size: 12px; -fx-font-weight: bold;" +
+                "-fx-border-color: rgba(56,189,248,0.35);" +
+                "-fx-border-width: 1; -fx-border-radius: 8;" +
+                "-fx-background-radius: 8; -fx-cursor: hand;" +
+                "-fx-padding: 4 10 4 10;"
+        );
+        scanBtn.setOnAction(e -> {
+            scanBtn.setDisable(true);
+            scanBtn.setText("Scanning…");
+            desktopGuard.scanAndApply();
+        });
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox headingRow = new HBox(heading, spacer, scanBtn);
+        headingRow.setAlignment(Pos.CENTER_LEFT);
+
+        desktopStatusLabel = new Label(
+            "Not scanned yet. Click Scan Now or activate LockIn."
+        );
+        desktopStatusLabel.setStyle(
+            "-fx-font-size: 12px; -fx-text-fill: " +
+                MUTED +
+                "; -fx-wrap-text: true;"
+        );
+        desktopStatusLabel.setMaxWidth(Double.MAX_VALUE);
+
+        blockedFilesFlow = new FlowPane(6, 5);
+        keptFilesFlow = new FlowPane(6, 5);
+
+        VBox blocked = new VBox(5, sectionHeading("BLOCKED"), blockedFilesFlow);
+        VBox kept = new VBox(5, sectionHeading("KEPT"), keptFilesFlow);
+
+        return new VBox(8, headingRow, desktopStatusLabel, blocked, kept);
+    }
+
+    private void renderDesktopFiles() {
+        List<DesktopGuard.DesktopFile> files = desktopGuard.getLastScan();
+
+        // Re-enable scan button
+        if (scanBtn != null) {
+            scanBtn.setDisable(false);
+            scanBtn.setText("⟳  Scan Now");
+        }
+
+        blockedFilesFlow.getChildren().clear();
+        keptFilesFlow.getChildren().clear();
+
+        long blockedCount = files
+            .stream()
+            .filter(DesktopGuard.DesktopFile::blocked)
+            .count();
+        long keptCount = files
+            .stream()
+            .filter(f -> !f.blocked())
+            .count();
+
+        if (files.isEmpty()) {
+            desktopStatusLabel.setText("Desktop is empty or no items found.");
+            return;
+        }
+
+        desktopStatusLabel.setText(
+            blockedCount +
+                " item(s) quarantined · " +
+                keptCount +
+                " item(s) kept"
+        );
+
+        for (DesktopGuard.DesktopFile f : files) {
+            String icon = f.isDirectory() ? "📁 " : "📄 ";
+            Label chip = new Label(icon + f.name());
+
+            if (f.blocked()) {
+                chip.setStyle(
+                    "-fx-background-color: rgba(251,113,133,0.15);" +
+                        "-fx-text-fill: #fb7185;" +
+                        "-fx-font-size: 11px;" +
+                        "-fx-background-radius: 999;" +
+                        "-fx-padding: 3 9 3 9;" +
+                        "-fx-border-color: rgba(251,113,133,0.3);" +
+                        "-fx-border-width: 1; -fx-border-radius: 999;"
+                );
+                blockedFilesFlow.getChildren().add(chip);
+            } else {
+                chip.setStyle(
+                    "-fx-background-color: rgba(74,222,128,0.10);" +
+                        "-fx-text-fill: #4ade80;" +
+                        "-fx-font-size: 11px;" +
+                        "-fx-background-radius: 999;" +
+                        "-fx-padding: 3 9 3 9;" +
+                        "-fx-border-color: rgba(74,222,128,0.25);" +
+                        "-fx-border-width: 1; -fx-border-radius: 999;"
+                );
+                keptFilesFlow.getChildren().add(chip);
+            }
+        }
     }
 
     // ── Footer ────────────────────────────────────────────────────────────────

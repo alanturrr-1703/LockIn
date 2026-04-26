@@ -128,6 +128,16 @@ public class ControlServer {
         return activeProfileId;
     }
 
+    public String getActiveProfilePrompt() {
+        String aid = activeProfileId;
+        return profiles
+            .stream()
+            .filter(p -> aid.equals(String.valueOf(p.getOrDefault("id", ""))))
+            .findFirst()
+            .map(p -> String.valueOf(p.getOrDefault("prompt", "")))
+            .orElse("");
+    }
+
     public void setOnProfilesUpdated(Runnable cb) {
         this.onProfilesUpdated = cb;
     }
